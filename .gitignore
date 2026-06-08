@@ -1,0 +1,7 @@
+data/*.db
+data/*.db-*
+reports/*.md
+archive/h5/web/radar.json
+__pycache__/
+*.pyc
+.venv/

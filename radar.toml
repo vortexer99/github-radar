@@ -1,0 +1,29 @@
+# GitHub Radar local configuration.
+# Set GITHUB_TOKEN in your environment for higher API rate limits.
+
+db_path = "data/radar.db"
+report_dir = "reports"
+min_stars = 100
+per_page = 50
+created_within_days = 45
+pushed_within_days = 14
+exploration_ratio = 0.25
+
+# Keep this broad during the cold-start period. Add languages later if you want.
+languages = []
+
+# Topics or keywords that should be strongly downranked.
+excluded_terms = []
+
+# Query templates use these placeholders:
+# {created_since}, {pushed_since}, {min_stars}
+query_templates = [
+  "created:>{created_since} stars:>{min_stars}",
+  "pushed:>{pushed_since} stars:>{min_stars}",
+  "topic:ai pushed:>{pushed_since} stars:>{min_stars}",
+  "topic:llm pushed:>{pushed_since} stars:>{min_stars}",
+  "topic:developer-tools pushed:>{pushed_since} stars:>{min_stars}",
+  "topic:security pushed:>{pushed_since} stars:>{min_stars}",
+  "topic:database pushed:>{pushed_since} stars:>{min_stars}",
+  "topic:cli pushed:>{pushed_since} stars:>{min_stars}"
+]

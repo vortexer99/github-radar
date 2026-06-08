@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GitHub Radar 阅读器</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --line: #d9dee7;
+      --text: #17202a;
+      --muted: #667085;
+      --accent: #1f7a5f;
+      --accent-soft: #e5f4ee;
+      --danger: #a43b45;
+      font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); }
+    .app { display: grid; grid-template-columns: 360px 1fr; height: 100vh; min-height: 640px; }
+    aside { border-right: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-width: 0; }
+    main { display: flex; flex-direction: column; min-width: 0; }
+    .topbar { padding: 12px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; background: var(--panel); }
+    .filters { padding: 12px; display: grid; gap: 8px; border-bottom: 1px solid var(--line); }
+    input, select, button { height: 34px; border: 1px solid var(--line); border-radius: 6px; background: white; color: var(--text); padding: 0 10px; font: inherit; }
+    button { cursor: pointer; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+    button.soft { background: var(--accent-soft); border-color: #acd9c8; color: #165c47; }
+    button.danger { color: var(--danger); }
+    .list { overflow: auto; padding: 8px; display: grid; gap: 6px; }
+    .repo { border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 10px; cursor: pointer; }
+    .repo.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+    .repo-title { font-weight: 700; overflow-wrap: anywhere; }
+    .repo-meta { margin-top: 4px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .mark { display: inline-flex; align-items: center; min-height: 22px; padding: 0 7px; border-radius: 999px; background: var(--accent-soft); color: #165c47; font-size: 12px; margin-left: 6px; }
+    .content { overflow: auto; padding: 22px; }
+    .empty { color: var(--muted); padding: 22px; }
+    h1 { margin: 0 0 8px; font-size: 26px; overflow-wrap: anywhere; }
+    h2 { font-size: 17px; margin-top: 26px; }
+    .desc { font-size: 15px; line-height: 1.65; max-width: 980px; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; margin: 18px 0; }
+    .stat { border: 1px solid var(--line); border-radius: 8px; background: white; padding: 10px; }
+    .stat span { display: block; color: var(--muted); font-size: 12px; }
+    .stat strong { display: block; margin-top: 4px; font-size: 17px; }
+    .tags { display: flex; gap: 6px; flex-wrap: wrap; }
+    .tag { border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; background: white; font-size: 12px; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 22px; border-top: 1px solid var(--line); background: var(--panel); }
+    .status { color: var(--muted); margin-left: auto; line-height: 34px; }
+    @media (max-width: 860px) {
+      .app { grid-template-columns: 1fr; height: auto; }
+      aside { min-height: 48vh; border-right: 0; border-bottom: 1px solid var(--line); }
+      .grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <div class="topbar">
+        <input id="jsonFile" type="file" accept="application/json,.json">
+        <button id="saveFeedback" class="soft">导出反馈</button>
+      </div>
+      <div class="filters">
+        <input id="search" placeholder="搜索名称、简介、语言、topics">
+        <select id="section"></select>
+        <select id="language"></select>
+        <select id="feedback"></select>
+      </div>
+      <div id="list" class="list"></div>
+    </aside>
+    <main>
+      <div id="content" class="content empty">请选择 `web/radar.json` 开始阅读。</div>
+      <div class="actions">
+        <button data-feedback="liked">喜欢</button>
+        <button data-feedback="saved" class="primary">收藏</button>
+        <button data-feedback="read">已阅</button>
+        <button data-feedback="disliked">不感兴趣</button>
+        <button data-feedback="hidden" class="danger">少看这类</button>
+        <button id="openGitHub">打开 GitHub</button>
+        <span id="status" class="status"></span>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const SECTION_LABELS = {
+      all: "全部分区",
+      personalized: "你可能感兴趣",
+      exploration: "探索推荐",
+      other: "其他热门"
+    };
+    const FEEDBACK_LABELS = {
+      liked: "喜欢",
+      saved: "收藏",
+      read: "已阅",
+      disliked: "不感兴趣",
+      hidden: "少看这类"
+    };
+    const FEEDBACK_FILTERS = {
+      all: "全部标记",
+      unmarked: "未标记",
+      ...FEEDBACK_LABELS
+    };
+
+    let payload = { items: [], feedback_labels: FEEDBACK_LABELS };
+    let feedback = JSON.parse(localStorage.getItem("githubRadarFeedback") || "{}");
+    let filtered = [];
+    let selected = null;
+
+    const els = {
+      file: document.querySelector("#jsonFile"),
+      save: document.querySelector("#saveFeedback"),
+      search: document.querySelector("#search"),
+      section: document.querySelector("#section"),
+      language: document.querySelector("#language"),
+      feedback: document.querySelector("#feedback"),
+      list: document.querySelector("#list"),
+      content: document.querySelector("#content"),
+      status: document.querySelector("#status"),
+      open: document.querySelector("#openGitHub")
+    };
+
+    fillSelect(els.section, SECTION_LABELS);
+    fillSelect(els.feedback, FEEDBACK_FILTERS);
+    fillSelect(els.language, { all: "所有语言" });
+
+    els.file.addEventListener("change", async event => {
+      const file = event.target.files[0];
+      if (!file) return;
+      payload = JSON.parse(await file.text());
+      for (const item of payload.items || []) {
+        if (item.feedback && !feedback[item.full_name]) feedback[item.full_name] = item.feedback;
+      }
+      populateLanguages();
+      applyFilters();
+      setStatus(`已读取 ${payload.items.length} 个项目`);
+    });
+    els.save.addEventListener("click", exportFeedback);
+    els.search.addEventListener("input", applyFilters);
+    els.section.addEventListener("change", applyFilters);
+    els.language.addEventListener("change", applyFilters);
+    els.feedback.addEventListener("change", applyFilters);
+    els.open.addEventListener("click", () => selected && window.open(selected.html_url, "_blank", "noopener"));
+    document.querySelectorAll("[data-feedback]").forEach(button => {
+      button.addEventListener("click", () => markSelected(button.dataset.feedback));
+    });
+
+    function fillSelect(select, options) {
+      select.innerHTML = "";
+      Object.entries(options).forEach(([value, label]) => {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        select.appendChild(option);
+      });
+    }
+
+    function populateLanguages() {
+      const languages = [...new Set(payload.items.map(item => item.language || "未知"))].sort();
+      fillSelect(els.language, { all: "所有语言", ...Object.fromEntries(languages.map(lang => [lang, lang])) });
+    }
+
+    function applyFilters() {
+      const q = els.search.value.trim().toLowerCase();
+      const section = els.section.value;
+      const language = els.language.value;
+      const feedbackFilter = els.feedback.value;
+      filtered = payload.items.filter(item => {
+        const mark = feedback[item.full_name] || item.feedback || null;
+        if (section !== "all" && item.section !== section) return false;
+        if (language !== "all" && (item.language || "未知") !== language) return false;
+        if (feedbackFilter === "unmarked" && mark) return false;
+        if (!["all", "unmarked"].includes(feedbackFilter) && mark !== feedbackFilter) return false;
+        const haystack = [item.full_name, item.summary, item.description, item.language, ...(item.topics || [])].join(" ").toLowerCase();
+        return !q || haystack.includes(q);
+      });
+      renderList();
+      if (selected && filtered.some(item => item.full_name === selected.full_name)) {
+        selectItem(selected.full_name);
+      } else {
+        selectItem(filtered[0]?.full_name);
+      }
+    }
+
+    function renderList() {
+      els.list.innerHTML = "";
+      filtered.forEach(item => {
+        const mark = feedback[item.full_name] || item.feedback;
+        const row = document.createElement("div");
+        row.className = "repo";
+        row.dataset.name = item.full_name;
+        row.innerHTML = `
+          <div class="repo-title">${escapeHtml(item.full_name)}${mark ? `<span class="mark">${FEEDBACK_LABELS[mark]}</span>` : ""}</div>
+          <div class="repo-meta">${SECTION_LABELS[item.section] || item.section} · ${escapeHtml(item.language || "未知")} · ${formatNumber(item.stars)} stars · score ${item.score.toFixed(2)}</div>
+        `;
+        row.addEventListener("click", () => selectItem(item.full_name));
+        els.list.appendChild(row);
+      });
+    }
+
+    function selectItem(fullName) {
+      selected = filtered.find(item => item.full_name === fullName) || null;
+      document.querySelectorAll(".repo").forEach(row => row.classList.toggle("active", row.dataset.name === fullName));
+      renderDetail();
+    }
+
+    function renderDetail() {
+      if (!selected) {
+        els.content.className = "content empty";
+        els.content.textContent = payload.items.length ? "没有匹配项目。" : "请选择 `web/radar.json` 开始阅读。";
+        return;
+      }
+      els.content.className = "content";
+      const mark = feedback[selected.full_name] || selected.feedback;
+      const topics = (selected.topics || []).map(topic => `<span class="tag">${escapeHtml(topic)}</span>`).join("") || "<span class='tag'>无</span>";
+      const reasons = (selected.reasons || []).map(reason => `<li>${escapeHtml(reason)}</li>`).join("") || "<li>综合热度较高</li>";
+      els.content.innerHTML = `
+        <h1>${escapeHtml(selected.full_name)}${mark ? `<span class="mark">${FEEDBACK_LABELS[mark]}</span>` : ""}</h1>
+        <h2>项目概述</h2>
+        <p class="desc">${escapeHtml(selected.summary || selected.description || "暂无描述")}</p>
+        <h2>原始简介</h2>
+        <p class="desc">${escapeHtml(selected.description || "暂无描述")}</p>
+        <div class="grid">
+          ${stat("分区", SECTION_LABELS[selected.section] || selected.section)}
+          ${stat("语言", selected.language || "未知")}
+          ${stat("Stars", formatNumber(selected.stars))}
+          ${stat("Forks", formatNumber(selected.forks))}
+          ${stat("近 7 天增长", `约 +${formatNumber(selected.star_delta)} stars`)}
+          ${stat("综合分", selected.score.toFixed(2))}
+          ${stat("热度", selected.heat_score.toFixed(2))}
+          ${stat("兴趣", selected.interest_score.toFixed(2))}
+        </div>
+        <h2>Topics</h2>
+        <div class="tags">${topics}</div>
+        <h2>推荐理由</h2>
+        <ul>${reasons}</ul>
+        <h2>时间</h2>
+        <p>创建：${escapeHtml(selected.created_at || "")}<br>更新：${escapeHtml(selected.pushed_at || "")}</p>
+      `;
+    }
+
+    function markSelected(tag) {
+      if (!selected) return;
+      feedback[selected.full_name] = tag;
+      localStorage.setItem("githubRadarFeedback", JSON.stringify(feedback));
+      setStatus(`已标记为“${FEEDBACK_LABELS[tag]}”：${selected.full_name}`);
+      applyFilters();
+    }
+
+    function exportFeedback() {
+      const blob = new Blob([JSON.stringify({
+        exported_at: new Date().toISOString(),
+        feedback
+      }, null, 2)], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "github-radar-feedback.json";
+      link.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function stat(label, value) {
+      return `<div class="stat"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`;
+    }
+
+    function setStatus(text) {
+      els.status.textContent = text;
+      window.clearTimeout(setStatus.timer);
+      setStatus.timer = window.setTimeout(() => els.status.textContent = "", 4500);
+    }
+
+    function formatNumber(value) {
+      return Number(value || 0).toLocaleString("en-US");
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, char => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[char]));
+    }
+  </script>
+</body>
+</html>
