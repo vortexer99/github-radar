@@ -1,5 +1,5 @@
 param(
-    [string]$ProjectRoot = "D:\Documents\Utilcode\github\github-radar",
+    [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$Python = "python"
 )
 

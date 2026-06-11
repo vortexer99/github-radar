@@ -1,7 +1,7 @@
 param(
     [string]$TaskName = "GitHub Radar",
-    [string]$ProjectRoot = "D:\Documents\Utilcode\github\github-radar",
-    [string]$Time = "09:00"
+    [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+    [string]$Time = "06:00"
 )
 
 $scriptPath = Join-Path $ProjectRoot "scripts\run-radar.ps1"
