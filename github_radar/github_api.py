@@ -5,7 +5,7 @@ import os
 import time
 from typing import Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from .models import Repository
@@ -55,8 +55,25 @@ def search_repositories(
     return repos
 
 
+def fetch_repository(full_name: str, *, token: str | None = None) -> Repository:
+    token = token or os.getenv("GITHUB_TOKEN")
+    clean_name = full_name.strip().strip("/")
+    if "/" not in clean_name:
+        raise GitHubApiError("Repository must be in owner/name format.")
+    owner, name = clean_name.split("/", 1)
+    if not owner or not name:
+        raise GitHubApiError("Repository must be in owner/name format.")
+    payload = _request_json(
+        f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}",
+        {},
+        token=token,
+    )
+    return _repo_from_item(payload, f"manual:{payload.get('full_name', clean_name)}")
+
+
 def _request_json(path: str, params: dict[str, str], *, token: str | None) -> dict:
-    url = f"{API_ROOT}{path}?{urlencode(params)}"
+    query = f"?{urlencode(params)}" if params else ""
+    url = f"{API_ROOT}{path}{query}"
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "github-radar-local",

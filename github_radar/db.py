@@ -61,6 +61,17 @@ def init_db(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (full_name) REFERENCES repositories(full_name)
         );
 
+        CREATE TABLE IF NOT EXISTS repository_tags (
+            full_name TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (full_name, tag),
+            FOREIGN KEY (full_name) REFERENCES repositories(full_name)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_repository_tags_tag
+        ON repository_tags(tag);
+
         CREATE TABLE IF NOT EXISTS profile_terms (
             term TEXT PRIMARY KEY,
             weight REAL NOT NULL,
@@ -152,6 +163,70 @@ def load_recent_repositories(conn: sqlite3.Connection, *, limit: int = 500) -> l
     return [_repo_from_row(row) for row in rows]
 
 
+def load_repository(conn: sqlite3.Connection, full_name: str) -> Repository | None:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM repositories
+        WHERE lower(full_name) = lower(?)
+        LIMIT 1
+        """,
+        (full_name,),
+    ).fetchone()
+    return _repo_from_row(row) if row else None
+
+
+def repository_stats(conn: sqlite3.Connection) -> dict[str, object]:
+    total = int(conn.execute("SELECT count(*) FROM repositories").fetchone()[0])
+    marked = int(
+        conn.execute(
+            """
+            SELECT count(DISTINCT full_name)
+            FROM feedback
+            WHERE tags_json != '[]'
+            """
+        ).fetchone()[0]
+    )
+    languages = conn.execute(
+        """
+        SELECT coalesce(nullif(language, ''), '未知') AS language, count(*) AS count
+        FROM repositories
+        GROUP BY coalesce(nullif(language, ''), '未知')
+        ORDER BY count DESC, language ASC
+        LIMIT 5
+        """
+    ).fetchall()
+    feedback = conn.execute(
+        """
+        SELECT tags_json, count(*) AS count
+        FROM feedback
+        GROUP BY tags_json
+        """
+    ).fetchall()
+    feedback_counts: dict[str, int] = {}
+    for row in feedback:
+        for tag in json.loads(row["tags_json"] or "[]"):
+            feedback_counts[tag] = feedback_counts.get(tag, 0) + int(row["count"])
+    tag_rows = conn.execute(
+        """
+        SELECT tag, count(*) AS count
+        FROM repository_tags
+        GROUP BY tag
+        ORDER BY tag ASC
+        """
+    ).fetchall()
+    return {
+        "total_repositories": total,
+        "marked_repositories": marked,
+        "tagged_repositories": int(
+            conn.execute("SELECT count(DISTINCT full_name) FROM repository_tags").fetchone()[0]
+        ),
+        "top_languages": [(row["language"], int(row["count"])) for row in languages],
+        "feedback_counts": feedback_counts,
+        "tag_counts": {row["tag"]: int(row["count"]) for row in tag_rows},
+    }
+
+
 def add_feedback(
     conn: sqlite3.Connection,
     full_names: Iterable[str],
@@ -211,6 +286,62 @@ def load_feedback(conn: sqlite3.Connection) -> list[Feedback]:
         )
         for row in rows
     ]
+
+
+def add_repository_tags(
+    conn: sqlite3.Connection,
+    full_name: str,
+    tags: Iterable[str],
+) -> int:
+    now = _now()
+    clean_tags = _clean_tags(tags)
+    for tag in clean_tags:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO repository_tags (full_name, tag, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (full_name, tag, now),
+        )
+    conn.commit()
+    return len(clean_tags)
+
+
+def remove_repository_tag(conn: sqlite3.Connection, full_name: str, tag: str) -> bool:
+    clean = _clean_tag(tag)
+    if not clean:
+        return False
+    cursor = conn.execute(
+        "DELETE FROM repository_tags WHERE full_name = ? AND tag = ?",
+        (full_name, clean),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def load_repository_tags(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    rows = conn.execute(
+        """
+        SELECT full_name, tag
+        FROM repository_tags
+        ORDER BY tag ASC
+        """
+    ).fetchall()
+    tags_by_repo: dict[str, list[str]] = {}
+    for row in rows:
+        tags_by_repo.setdefault(row["full_name"], []).append(row["tag"])
+    return tags_by_repo
+
+
+def load_all_repository_tags(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT tag
+        FROM repository_tags
+        ORDER BY tag ASC
+        """
+    ).fetchall()
+    return [row["tag"] for row in rows]
 
 
 def load_profile_terms(conn: sqlite3.Connection) -> dict[str, float]:
@@ -313,3 +444,13 @@ def _repo_from_row(row: sqlite3.Row) -> Repository:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _clean_tags(tags: Iterable[str]) -> list[str]:
+    cleaned = {_clean_tag(tag) for tag in tags}
+    cleaned.discard("")
+    return sorted(cleaned)
+
+
+def _clean_tag(tag: str) -> str:
+    return tag.strip().lower()

@@ -86,7 +86,7 @@ def _render_item(index: int, item: ScoredRepository) -> list[str]:
         f"- 简介：{description}",
         f"- 分类：{language} / {topics}",
         f"- 热度：{repo.stars:,} stars，{repo.forks:,} forks，近 7 天约 +{item.star_delta:,} stars",
-        f"- 入库：首次 {repo.first_seen_at or '未知'}，最后采集 {repo.last_seen_at or '未知'}",
+        f"- 入库：首次 {_format_time(repo.first_seen_at)}，最后采集 {_format_time(repo.last_seen_at)}",
         f"- 推荐理由：{reasons}",
         f"- 风险/噪声：{risks}",
         f"- 分数：综合 {item.total_score:.2f}，热度 {item.heat_score:.2f}，增长 {item.growth_score:.2f}，兴趣 {item.interest_score:.2f}",
@@ -118,3 +118,13 @@ def _age_days(created_at: str) -> float | None:
     except ValueError:
         return None
     return max(0.0, (datetime.now(timezone.utc) - created).total_seconds() / 86400)
+
+
+def _format_time(value: str) -> str:
+    if not value:
+        return "未知"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M")

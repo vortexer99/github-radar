@@ -7,20 +7,23 @@ import random
 from datetime import datetime
 from html import escape
 from pathlib import Path
+import re
 
 from . import db
+from .github_api import GitHubApiError, fetch_repository
 from .models import ScoredRepository
 from .scorer import score_all_repositories
 from .settings import load_settings
 from .summarizer import summarize_repository
 
 try:
-    from PySide6.QtCore import Qt, QUrl
+    from PySide6.QtCore import QStringListModel, Qt, QUrl
     from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
         QComboBox,
+        QCompleter,
         QHBoxLayout,
         QLabel,
         QLineEdit,
@@ -29,6 +32,7 @@ try:
         QMainWindow,
         QMessageBox,
         QPushButton,
+        QInputDialog,
         QSplitter,
         QStatusBar,
         QTextBrowser,
@@ -89,6 +93,8 @@ class RadarReader(QMainWindow):
         self.scored: list[ScoredRepository] = []
         self.filtered: list[ScoredRepository] = []
         self.feedback_by_repo: dict[str, str] = {}
+        self.tags_by_repo: dict[str, list[str]] = {}
+        self.all_tags: list[str] = []
         self.current: ScoredRepository | None = None
 
         self.setWindowTitle("GitHub Radar 阅读器")
@@ -108,6 +114,10 @@ class RadarReader(QMainWindow):
         collect_action = QAction("采集并刷新", self)
         collect_action.triggered.connect(self.collect_and_reload)
         toolbar.addAction(collect_action)
+
+        import_action = QAction("导入仓库", self)
+        import_action.triggered.connect(self.import_repository)
+        toolbar.addAction(import_action)
 
         next_action = QAction("下一条", self)
         next_action.setShortcut("Ctrl+N")
@@ -152,6 +162,10 @@ class RadarReader(QMainWindow):
             self.feedback_filter.addItem(label, key)
         self.feedback_filter.currentIndexChanged.connect(self.feedback_filter_changed)
         left_layout.addWidget(self.feedback_filter)
+
+        self.tag_filter = QComboBox()
+        self.tag_filter.currentIndexChanged.connect(lambda *_args: self.apply_filters())
+        left_layout.addWidget(self.tag_filter)
 
         self.sort_filter = QComboBox()
         for key, label in SORT_OPTIONS.items():
@@ -206,6 +220,33 @@ class RadarReader(QMainWindow):
         buttons.addWidget(self.open_button)
         right_layout.addLayout(buttons)
 
+        tag_row = QHBoxLayout()
+        tag_row.setSpacing(6)
+        tag_row.addWidget(QLabel("标签"))
+
+        self.tag_pills = QWidget()
+        self.tag_pills_layout = QHBoxLayout(self.tag_pills)
+        self.tag_pills_layout.setContentsMargins(0, 0, 0, 0)
+        self.tag_pills_layout.setSpacing(6)
+        tag_row.addWidget(self.tag_pills)
+
+        self.tag_input = QLineEdit()
+        self.tag_input.setPlaceholderText("添加标签...")
+        self.tag_input.returnPressed.connect(self.add_current_tags)
+        self.tag_completer_model = QStringListModel()
+        self.tag_completer = QCompleter(self.tag_completer_model, self)
+        self.tag_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.tag_completer.setFilterMode(Qt.MatchContains)
+        self.tag_completer.activated[str].connect(self._add_tag_from_text)
+        self.tag_input.setCompleter(self.tag_completer)
+        tag_row.addWidget(self.tag_input, 1)
+
+        self.add_tag_button = QPushButton("+")
+        self.add_tag_button.setToolTip("添加标签")
+        self.add_tag_button.clicked.connect(self.add_current_tags)
+        tag_row.addWidget(self.add_tag_button)
+        right_layout.addLayout(tag_row)
+
         root.addWidget(right)
         root.setSizes([370, 810])
 
@@ -213,7 +254,9 @@ class RadarReader(QMainWindow):
         repos = db.load_recent_repositories(self.conn, limit=500)
         self.scored = score_all_repositories(self.conn, repos, self.settings)
         self.feedback_by_repo = self._load_latest_feedback()
+        self.tags_by_repo = db.load_repository_tags(self.conn)
         self._populate_languages()
+        self._populate_tags()
         self.apply_filters()
         self.status.showMessage(f"已载入 {len(self.scored)} 个项目", 5000)
 
@@ -237,6 +280,35 @@ class RadarReader(QMainWindow):
             return
         self.reload_data()
 
+    def import_repository(self) -> None:
+        full_name, ok = QInputDialog.getText(
+            self,
+            "导入仓库",
+            "输入 GitHub 仓库名（owner/name）：",
+        )
+        full_name = full_name.strip()
+        if not ok or not full_name:
+            return
+        self.status.showMessage(f"正在导入 {full_name} ...")
+        QApplication.processEvents()
+        try:
+            repo = fetch_repository(full_name)
+            db.upsert_repositories(self.conn, [repo])
+        except GitHubApiError as exc:
+            QMessageBox.warning(self, "导入失败", str(exc))
+            return
+
+        self._prompt_tags_for_import(repo.full_name)
+        self.reload_data()
+        self.apply_filters(preferred_name=repo.full_name)
+        item = self._find_scored(repo.full_name)
+        self._prepare_tag_input()
+        QMessageBox.information(
+            self,
+            "导入完成",
+            self._import_summary(item, repo.full_name),
+        )
+
     def apply_filters(self, preferred_name: str | None = None, preferred_row: int | None = None) -> None:
         selected_name = preferred_name
         if selected_name is None:
@@ -245,12 +317,14 @@ class RadarReader(QMainWindow):
         section = self.section_filter.currentData()
         language = self.language_filter.currentData() if self.language_filter.count() else "all"
         feedback = self.feedback_filter.currentData()
+        tag_filter = self.tag_filter.currentData() if self.tag_filter.count() else "all"
         sort_key = self.sort_filter.currentData()
 
         self.filtered = []
         for item in self.scored:
             repo = item.repo
             repo_feedback = self.feedback_by_repo.get(repo.full_name)
+            repo_tags = self.tags_by_repo.get(repo.full_name, [])
             if section != "all" and item.section != section:
                 continue
             if language != "all" and (repo.language or "未知") != language:
@@ -259,8 +333,12 @@ class RadarReader(QMainWindow):
                 continue
             if feedback not in ("all", "unmarked") and repo_feedback != feedback:
                 continue
+            if tag_filter == "__untagged__" and repo_tags:
+                continue
+            if tag_filter not in ("all", "__untagged__") and tag_filter not in repo_tags:
+                continue
             haystack = " ".join(
-                [repo.full_name, repo.description, repo.language, " ".join(repo.topics)]
+                [repo.full_name, repo.description, repo.language, " ".join(repo.topics), " ".join(repo_tags)]
             ).lower()
             if query and query not in haystack:
                 continue
@@ -294,6 +372,7 @@ class RadarReader(QMainWindow):
         marker = self.feedback_by_repo.get(repo.full_name)
         suffix = f"（{FEEDBACK_LABELS[marker]}）" if marker else ""
         self.title.setText(f"{repo.full_name}{suffix}")
+        self._prepare_tag_input()
         self.detail.setHtml(self._detail_html(self.current))
 
     def record_feedback(self, signal: int, tag: str) -> None:
@@ -308,6 +387,56 @@ class RadarReader(QMainWindow):
             self.apply_filters(preferred_row=current_row)
         else:
             self.apply_filters(preferred_name=repo.full_name)
+
+    def add_current_tags(self) -> None:
+        if self.current is None:
+            return
+        repo = self.current.repo
+        tags = _split_tags(self.tag_input.text())
+        if not tags:
+            self.status.showMessage("请输入或选择要添加的标签", 3000)
+            return
+        self._add_tags_to_current(tags)
+
+    def _add_tag_from_text(self, tag: str) -> None:
+        if self.current is None:
+            return
+        tags = _split_tags(tag)
+        if not tags:
+            return
+        self._add_tags_to_current(tags)
+
+    def _add_tags_to_current(self, tags: list[str]) -> None:
+        if self.current is None:
+            return
+        repo = self.current.repo
+        db.add_repository_tags(self.conn, repo.full_name, tags)
+        current_tags = set(self.tags_by_repo.get(repo.full_name, []))
+        clean_tags = {tag.strip().lower() for tag in tags if tag.strip()}
+        current_tags.update(clean_tags)
+        self.tags_by_repo[repo.full_name] = sorted(current_tags)
+        self._populate_tags()
+        self.apply_filters(preferred_name=repo.full_name)
+        self.tag_input.clear()
+        self.status.showMessage(f"已给 {repo.full_name} 添加标签：{', '.join(sorted(clean_tags))}", 5000)
+
+    def remove_current_tag(self, tag: str) -> None:
+        if self.current is None:
+            return
+        repo = self.current.repo
+        if not db.remove_repository_tag(self.conn, repo.full_name, tag):
+            self.status.showMessage(f"{repo.full_name} 没有标签：{tag}", 3000)
+            return
+        remaining_tags = [
+            existing for existing in self.tags_by_repo.get(repo.full_name, []) if existing != tag
+        ]
+        if remaining_tags:
+            self.tags_by_repo[repo.full_name] = remaining_tags
+        else:
+            self.tags_by_repo.pop(repo.full_name, None)
+        self._populate_tags()
+        self.apply_filters(preferred_name=repo.full_name)
+        self.status.showMessage(f"已从 {repo.full_name} 移除标签：{tag}", 5000)
 
     def next_item(self) -> None:
         if not self.filtered:
@@ -332,6 +461,59 @@ class RadarReader(QMainWindow):
         row = random.choice(choices)
         self.repo_list.setCurrentRow(row)
         self.status.showMessage(f"随机选中：{self.filtered[row].repo.full_name}", 3000)
+
+    def _prompt_tags_for_import(self, full_name: str) -> None:
+        all_tags = db.load_all_repository_tags(self.conn)
+        label = f"给 {full_name} 添加标签（可选，多个用逗号分隔）："
+        if all_tags:
+            tag_text, ok = QInputDialog.getItem(
+                self,
+                "添加标签",
+                label,
+                all_tags,
+                0,
+                True,
+            )
+        else:
+            tag_text, ok = QInputDialog.getText(self, "添加标签", label)
+        if ok:
+            tags = _split_tags(tag_text)
+            if tags:
+                db.add_repository_tags(self.conn, full_name, tags)
+
+    def _find_scored(self, full_name: str) -> ScoredRepository | None:
+        for item in self.scored:
+            if item.repo.full_name.lower() == full_name.lower():
+                return item
+        return None
+
+    def _import_summary(self, item: ScoredRepository | None, full_name: str) -> str:
+        stats = db.repository_stats(self.conn)
+        if item is None:
+            return f"已导入 {full_name}\n\n当前数据库仓库数：{stats['total_repositories']}"
+
+        repo = item.repo
+        top_languages = "，".join(
+            f"{language} {count}" for language, count in stats["top_languages"]
+        ) or "无"
+        feedback_counts = stats["feedback_counts"]
+        feedback_text = "，".join(
+            f"{FEEDBACK_LABELS.get(tag, tag)} {count}" for tag, count in sorted(feedback_counts.items())
+        ) or "无"
+        return (
+            f"已导入：{repo.full_name}\n\n"
+            f"综合分：{item.total_score:.2f}\n"
+            f"热度：{item.heat_score:.2f}  增长：{item.growth_score:.2f}  "
+            f"新鲜度：{item.recency_score:.2f}  兴趣：{item.interest_score:.2f}\n"
+            f"Stars：{repo.stars:,}  Forks：{repo.forks:,}  语言：{repo.language or '未知'}\n"
+            f"首次入库：{self._format_time(repo.first_seen_at)}\n"
+            f"最后采集：{self._format_time(repo.last_seen_at)}\n\n"
+            f"数据库统计：\n"
+            f"仓库总数：{stats['total_repositories']}\n"
+            f"已标记仓库：{stats['marked_repositories']}\n"
+            f"热门语言：{top_languages}\n"
+            f"反馈计数：{feedback_text}"
+        )
 
     def toggle_unmarked_filter(self, *_args) -> None:
         target = "unmarked" if self.only_unmarked.isChecked() else "all"
@@ -368,6 +550,61 @@ class RadarReader(QMainWindow):
         self.language_filter.setCurrentIndex(index if index >= 0 else 0)
         self.language_filter.blockSignals(False)
 
+    def _populate_tags(self) -> None:
+        current_filter = self.tag_filter.currentData() if self.tag_filter.count() else "all"
+        self.all_tags = db.load_all_repository_tags(self.conn)
+
+        self.tag_filter.blockSignals(True)
+        self.tag_filter.clear()
+        self.tag_filter.addItem("全部标签", "all")
+        self.tag_filter.addItem("未加标签", "__untagged__")
+        for tag in self.all_tags:
+            self.tag_filter.addItem(tag, tag)
+        index = self.tag_filter.findData(current_filter)
+        self.tag_filter.setCurrentIndex(index if index >= 0 else 0)
+        self.tag_filter.blockSignals(False)
+
+        if hasattr(self, "tag_completer_model"):
+            self.tag_completer_model.setStringList(self.all_tags)
+
+    def _prepare_tag_input(self) -> None:
+        if self.current is None:
+            self.tag_input.clear()
+            self._render_tag_pills([])
+            return
+        repo_tags = self.tags_by_repo.get(self.current.repo.full_name, [])
+        self.tag_input.clear()
+        self._render_tag_pills(repo_tags)
+
+    def _render_tag_pills(self, tags: list[str]) -> None:
+        while self.tag_pills_layout.count():
+            item = self.tag_pills_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for tag in tags:
+            pill = QPushButton(f"{tag}  ×")
+            pill.setToolTip("点击移除标签")
+            pill.setCursor(Qt.PointingHandCursor)
+            pill.setStyleSheet(
+                """
+                QPushButton {
+                    background: #eef2f7;
+                    color: #334155;
+                    border: 1px solid #d8dee9;
+                    border-radius: 10px;
+                    padding: 3px 8px;
+                }
+                QPushButton:hover {
+                    background: #e2e8f0;
+                    color: #0f172a;
+                }
+                """
+            )
+            pill.clicked.connect(lambda checked=False, t=tag: self.remove_current_tag(t))
+            self.tag_pills_layout.addWidget(pill)
+        self.tag_pills_layout.addStretch(1)
+
     def _load_latest_feedback(self) -> dict[str, str]:
         latest: dict[str, str] = {}
         for item in reversed(db.load_feedback(self.conn)):
@@ -381,11 +618,14 @@ class RadarReader(QMainWindow):
         repo = item.repo
         marker = self.feedback_by_repo.get(repo.full_name)
         suffix = f"（{FEEDBACK_LABELS[marker]}）" if marker else ""
+        tags = self.tags_by_repo.get(repo.full_name, [])
+        tag_text = f" · 标签 {', '.join(tags)}" if tags else ""
         label = (
             f"{repo.full_name}{suffix}\n"
             f"{SECTION_LABELS.get(item.section, item.section)} · "
             f"{repo.language or '未知'} · {repo.stars:,} stars · "
             f"采集 {self._format_time(repo.last_seen_at)} · score {item.total_score:.2f}"
+            f"{tag_text}"
         )
         widget_item = QListWidgetItem(label)
         widget_item.setToolTip(repo.description or repo.full_name)
@@ -399,6 +639,7 @@ class RadarReader(QMainWindow):
         repo = item.repo
         marker = self.feedback_by_repo.get(repo.full_name)
         feedback = FEEDBACK_LABELS[marker] if marker else "未标记"
+        custom_tags = escape(", ".join(self.tags_by_repo.get(repo.full_name, [])) or "无")
         summary = escape(summarize_repository(repo))
         topics = escape(", ".join(repo.topics) if repo.topics else "无")
         reasons = "<br>".join(f"- {escape(reason)}" for reason in item.reasons) or "综合热度较高"
@@ -413,6 +654,7 @@ class RadarReader(QMainWindow):
         <p>{description}</p>
         <table>
           <tr><td><b>当前标记</b></td><td>{feedback}</td></tr>
+          <tr><td><b>自定义标签</b></td><td>{custom_tags}</td></tr>
           <tr><td><b>分区</b></td><td>{SECTION_LABELS.get(item.section, item.section)}</td></tr>
           <tr><td><b>语言</b></td><td>{language}</td></tr>
           <tr><td><b>Topics</b></td><td>{topics}</td></tr>
@@ -421,8 +663,8 @@ class RadarReader(QMainWindow):
           <tr><td><b>近 7 天增长</b></td><td>约 +{item.star_delta:,} stars</td></tr>
           <tr><td><b>首次入库</b></td><td>{escape(self._format_time(repo.first_seen_at))}</td></tr>
           <tr><td><b>最后采集</b></td><td>{escape(self._format_time(repo.last_seen_at))}</td></tr>
-          <tr><td><b>创建时间</b></td><td>{repo.created_at}</td></tr>
-          <tr><td><b>更新时间</b></td><td>{repo.pushed_at}</td></tr>
+          <tr><td><b>创建时间</b></td><td>{escape(self._format_time(repo.created_at))}</td></tr>
+          <tr><td><b>更新时间</b></td><td>{escape(self._format_time(repo.pushed_at))}</td></tr>
         </table>
         <h3>推荐理由</h3>
         <p>{reasons}</p>
@@ -469,7 +711,11 @@ class RadarReader(QMainWindow):
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             return value
-        return parsed.strftime("%Y-%m-%d %H:%M")
+        return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def _split_tags(value: str) -> list[str]:
+    return [tag.strip() for tag in re.split(r"[,，;；\s]+", value) if tag.strip()]
 
 
 def main(argv: list[str] | None = None) -> int:
