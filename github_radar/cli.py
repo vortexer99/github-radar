@@ -4,9 +4,9 @@ import argparse
 import sys
 
 from . import db
-from .github_api import GitHubApiError, search_repositories
+from .github_api import GitHubApiError, fetch_repository, search_repositories
 from .report import write_markdown_report
-from .scorer import score_repositories
+from .scorer import score_all_repositories, score_repositories
 from .settings import load_settings
 
 
@@ -24,6 +24,8 @@ def main(argv: list[str] | None = None) -> int:
         return report(args, settings, conn)
     if args.command == "feedback":
         return feedback(args, settings, conn)
+    if args.command == "import-repo":
+        return import_repo(args, settings, conn)
     if args.command == "run":
         return run(args, settings, conn)
 
@@ -57,6 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
     feedback_parser.add_argument("--more-topic", nargs="*", default=[], help="Topics or keywords to boost.")
     feedback_parser.add_argument("--less-topic", nargs="*", default=[], help="Topics or keywords to downrank.")
     feedback_parser.add_argument("--note", default="", help="Optional note for repo feedback.")
+
+    import_parser = sub.add_parser("import-repo", help="Manually import specific repositories.")
+    import_parser.add_argument("--config", default=None, help="Path to radar.toml.")
+    import_parser.add_argument("repos", nargs="+", help="Repositories in owner/name format.")
 
     return parser
 
@@ -92,6 +98,36 @@ def feedback(args: argparse.Namespace, settings, conn) -> int:
     boosted = db.add_profile_terms(conn, args.more_topic, delta=1.25)
     downranked = db.add_profile_terms(conn, args.less_topic, delta=-1.25)
     print(f"Recorded {total} repo feedback items, boosted {boosted} terms, downranked {downranked} terms.")
+    return 0
+
+
+def import_repo(args: argparse.Namespace, settings, conn) -> int:
+    imported = []
+    try:
+        for full_name in args.repos:
+            repo = fetch_repository(full_name)
+            db.upsert_repositories(conn, [repo])
+            stored = db.load_repository(conn, repo.full_name)
+            if stored:
+                imported.append(stored)
+    except GitHubApiError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    scored = score_all_repositories(conn, imported, settings)
+    stats = db.repository_stats(conn)
+    for item in scored:
+        repo = item.repo
+        print(f"{repo.full_name}")
+        print(f"  score={item.total_score:.2f} heat={item.heat_score:.2f} growth={item.growth_score:.2f} interest={item.interest_score:.2f}")
+        print(f"  stars={repo.stars:,} forks={repo.forks:,} language={repo.language or '未知'}")
+        print(f"  first_seen={repo.first_seen_at or '未知'} last_seen={repo.last_seen_at or '未知'}")
+    print(
+        "Stats: "
+        f"repos={stats['total_repositories']}, "
+        f"marked={stats['marked_repositories']}, "
+        f"top_languages={stats['top_languages']}"
+    )
     return 0
 
 

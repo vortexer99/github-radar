@@ -10,20 +10,24 @@ from pathlib import Path
 import re
 
 from . import db
-from .github_api import GitHubApiError, fetch_repository
-from .models import ScoredRepository
+from . import __version__
+from .github_api import GitHubApiError, fetch_repository, search_repositories
+from .models import Repository, ScoredRepository
 from .scorer import score_all_repositories
-from .settings import load_settings
+from .settings import load_settings, save_github_token
 from .summarizer import summarize_repository
 
 try:
-    from PySide6.QtCore import QStringListModel, Qt, QUrl
-    from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices
+    from PySide6.QtCore import QSize, QStringListModel, Qt, QUrl
+    from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPen
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
         QComboBox,
         QCompleter,
+        QDialog,
+        QDialogButtonBox,
+        QFormLayout,
         QHBoxLayout,
         QLabel,
         QLineEdit,
@@ -33,8 +37,12 @@ try:
         QMessageBox,
         QPushButton,
         QInputDialog,
+        QPlainTextEdit,
+        QStyledItemDelegate,
+        QStyle,
         QSplitter,
         QStatusBar,
+        QTabWidget,
         QTextBrowser,
         QToolBar,
         QVBoxLayout,
@@ -84,10 +92,397 @@ SORT_OPTIONS = {
 }
 
 
+class RepoListDelegate(QStyledItemDelegate):
+    def paint(self, painter: QPainter, option, index) -> None:
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        marker = index.data(Qt.UserRole) or ""
+        selected = bool(option.state & QStyle.State_Selected)
+        hover = bool(option.state & QStyle.State_MouseOver)
+        background, foreground = FEEDBACK_COLORS.get(marker, ("#ffffff", "#1f2937"))
+        border = "#e0e7f1"
+        if marker:
+            border = QColor(background).darker(112).name()
+        if hover:
+            border = "#9fc3f2"
+        if selected:
+            border = "#2563eb"
+
+        rect = option.rect.adjusted(2, 2, -2, -2)
+        painter.setPen(QPen(QColor(border), 1))
+        painter.setBrush(QColor(background))
+        painter.drawRoundedRect(rect, 7, 7)
+
+        text_rect = rect.adjusted(12, 8, -12, -8)
+        lines = (index.data(Qt.DisplayRole) or "").splitlines()
+        title = lines[0] if lines else ""
+        meta = lines[1] if len(lines) > 1 else ""
+
+        title_font = QFont(option.font)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.setPen(QColor("#0f172a" if selected else foreground))
+        title_metrics = painter.fontMetrics()
+        painter.drawText(
+            text_rect,
+            Qt.AlignLeft | Qt.AlignTop,
+            title_metrics.elidedText(title, Qt.ElideRight, text_rect.width()),
+        )
+
+        meta_font = QFont(option.font)
+        meta_font.setPointSize(max(8, meta_font.pointSize() - 1))
+        painter.setFont(meta_font)
+        painter.setPen(QColor("#475569" if not marker else foreground))
+        meta_metrics = painter.fontMetrics()
+        meta_rect = text_rect.adjusted(0, 25, 0, 0)
+        painter.drawText(
+            meta_rect,
+            Qt.AlignLeft | Qt.AlignTop,
+            meta_metrics.elidedText(meta, Qt.ElideRight, meta_rect.width()),
+        )
+        painter.restore()
+
+    def sizeHint(self, option, index) -> QSize:
+        return QSize(super().sizeHint(option, index).width(), 70)
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, reader: "RadarReader") -> None:
+        super().__init__(reader)
+        self.reader = reader
+        self.setWindowTitle("设置")
+        self.resize(520, 360)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        tabs = QTabWidget()
+        tabs.addTab(self._github_tab(), "GitHub")
+        tabs.addTab(self._about_tab(), "关于")
+        layout.addWidget(tabs, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def github_token(self) -> str:
+        return self.token_input.text().strip()
+
+    def _github_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        self.token_input = QLineEdit()
+        self.token_input.setEchoMode(QLineEdit.Password)
+        self.token_input.setPlaceholderText("ghp_... 或 fine-grained token")
+        self.token_input.setText(self.reader.settings.github_token)
+        form.addRow("GitHub Token", self.token_input)
+        layout.addLayout(form)
+
+        hint = QLabel(
+            "Token 会保存到项目根目录的 .env 文件，采集和导入仓库时自动使用。"
+            "留空并保存可以清除当前项目 Token。"
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("MutedText")
+        layout.addWidget(hint)
+        layout.addStretch(1)
+        return tab
+
+    def _about_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        icon_label = QLabel()
+        icon_path = self.reader.settings.project_root / "assets" / "app-icon.png"
+        if icon_path.exists():
+            icon = QIcon(str(icon_path))
+            icon_label.setPixmap(icon.pixmap(96, 96))
+        icon_label.setAlignment(Qt.AlignHCenter)
+        layout.addWidget(icon_label)
+
+        stats = db.repository_stats(self.reader.conn)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        for label, value in [
+            ("软件", "GitHub Radar 阅读器"),
+            ("版本", __version__),
+            ("GitHub", '<a href="https://github.com/vortexer99/github-radar">vortexer99/github-radar</a>'),
+            ("项目目录", str(self.reader.settings.project_root)),
+            ("数据库", str(self.reader.settings.db_path)),
+            ("报告目录", str(self.reader.settings.report_dir)),
+            ("仓库总数", str(stats["total_repositories"])),
+            ("已标记仓库", str(stats["marked_repositories"])),
+            ("已加标签仓库", str(stats.get("tagged_repositories", 0))),
+            ("Python", sys.version.split()[0]),
+        ]:
+            value_label = QLabel(value)
+            value_label.setOpenExternalLinks(True)
+            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            value_label.setWordWrap(True)
+            form.addRow(label, value_label)
+        layout.addLayout(form)
+        layout.addStretch(1)
+        return tab
+
+
+class RefreshDataDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("刷新数据")
+        self.resize(440, 190)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("刷新仓库数据")
+        title.setObjectName("PanelTitle")
+        layout.addWidget(title)
+
+        hint = QLabel("默认仅从本地数据库重新加载，速度更快且不会访问 GitHub。")
+        hint.setObjectName("MutedText")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.fetch_from_github = QCheckBox("从 GitHub 获取最新数据后再刷新")
+        self.fetch_from_github.setChecked(False)
+        self.fetch_from_github.setToolTip("选中后会运行采集任务并更新本地数据库")
+        layout.addWidget(self.fetch_from_github)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("刷新")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def should_fetch_from_github(self) -> bool:
+        return self.fetch_from_github.isChecked()
+
+
+class BatchImportDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("批量导入仓库")
+        self.resize(560, 420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        title = QLabel("每行输入一个 GitHub 仓库")
+        title.setObjectName("PanelTitle")
+        layout.addWidget(title)
+
+        self.repo_input = QPlainTextEdit()
+        self.repo_input.setPlaceholderText(
+            "owner/repo\nanother-owner/another-repo\nhttps://github.com/owner/repo"
+        )
+        layout.addWidget(self.repo_input, 1)
+
+        self.tags_input = QLineEdit()
+        self.tags_input.setPlaceholderText("可选：给本次导入的仓库统一添加标签，例如 ai, cli")
+        layout.addWidget(self.tags_input)
+
+        hint = QLabel("支持 owner/repo 或 GitHub 仓库 URL。空行会自动忽略。")
+        hint.setObjectName("MutedText")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("导入")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def repo_names(self) -> list[str]:
+        return _parse_repo_names(self.repo_input.toPlainText())
+
+    def tags(self) -> list[str]:
+        return _split_tags(self.tags_input.text())
+
+
+class SearchResultWidget(QWidget):
+    def __init__(self, repo: Repository) -> None:
+        super().__init__()
+        self.setObjectName("SearchResultRow")
+        self.checkbox = QCheckBox()
+        self.checkbox.setObjectName("SearchResultCheck")
+
+        title = QLabel(repo.full_name)
+        title.setObjectName("SearchResultTitle")
+        title.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        topics = ", ".join(repo.topics[:5]) if repo.topics else "无 topics"
+        meta = QLabel(f"{repo.stars:,} stars · {repo.language or '未知'} · {topics}")
+        meta.setObjectName("SearchResultMeta")
+        meta.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        description = QLabel(repo.description or "暂无描述")
+        description.setObjectName("SearchResultDescription")
+        description.setWordWrap(True)
+        description.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(2)
+        text_layout.addWidget(title)
+        text_layout.addWidget(meta)
+        text_layout.addWidget(description)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(10)
+        layout.addWidget(self.checkbox, 0, Qt.AlignTop)
+        layout.addLayout(text_layout, 1)
+
+    def is_checked(self) -> bool:
+        return self.checkbox.isChecked()
+
+    def toggle_checked(self) -> None:
+        self.checkbox.setChecked(not self.checkbox.isChecked())
+
+
+class TopicImportDialog(QDialog):
+    def __init__(self, reader: "RadarReader") -> None:
+        super().__init__(reader)
+        self.reader = reader
+        self.results: list[Repository] = []
+        self.setWindowTitle("搜索 Repo 导入")
+        self.resize(760, 560)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        search_row = QHBoxLayout()
+        self.query_input = QLineEdit()
+        self.query_input.setPlaceholderText("输入 topic 或关键词搜索 Repo，例如 ai、agent、developer-tools")
+        self.query_input.returnPressed.connect(self.search)
+        search_row.addWidget(self.query_input, 1)
+
+        self.search_button = QPushButton("搜索")
+        self.search_button.clicked.connect(self.search)
+        search_row.addWidget(self.search_button)
+        layout.addLayout(search_row)
+
+        hint = QLabel("会优先按 GitHub topic 搜索 Repo；如果没有结果，再按关键词搜索。勾选结果后点击“导入选中”。")
+        hint.setObjectName("MutedText")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.result_list = QListWidget()
+        self.result_list.setObjectName("SearchResultList")
+        self.result_list.setSpacing(4)
+        self.result_list.itemClicked.connect(self._toggle_result_item)
+        layout.addWidget(self.result_list, 1)
+
+        button_row = QHBoxLayout()
+        self.status_label = QLabel("输入 topic 或关键词后开始搜索 Repo")
+        self.status_label.setObjectName("MutedText")
+        button_row.addWidget(self.status_label, 1)
+
+        select_all_button = QPushButton("全选")
+        select_all_button.clicked.connect(lambda: self._set_all_checked(True))
+        button_row.addWidget(select_all_button)
+
+        clear_all_button = QPushButton("全不选")
+        clear_all_button.clicked.connect(lambda: self._set_all_checked(False))
+        button_row.addWidget(clear_all_button)
+
+        self.import_button = QPushButton("导入选中")
+        self.import_button.setObjectName("PrimaryButton")
+        self.import_button.clicked.connect(self.accept)
+        button_row.addWidget(self.import_button)
+
+        cancel_button = QPushButton("取消")
+        cancel_button.clicked.connect(self.reject)
+        button_row.addWidget(cancel_button)
+        layout.addLayout(button_row)
+
+    def selected_repositories(self) -> list[Repository]:
+        selected: list[Repository] = []
+        for index, repo in enumerate(self.results):
+            item = self.result_list.item(index)
+            widget = self.result_list.itemWidget(item) if item else None
+            if isinstance(widget, SearchResultWidget) and widget.is_checked():
+                selected.append(repo)
+        return selected
+
+    def search_term(self) -> str:
+        return self.query_input.text().strip()
+
+    def search(self) -> None:
+        term = self.search_term()
+        if not term:
+            self.status_label.setText("请输入 topic 或关键词")
+            return
+
+        self.search_button.setEnabled(False)
+        self.search_button.setText("搜索中...")
+        self.result_list.clear()
+        self.status_label.setText(f"正在搜索 {term} ...")
+        QApplication.processEvents()
+
+        topic = _clean_search_topic(term)
+        queries = [f"topic:{topic} stars:>10"] if topic else []
+        if topic != term.lower():
+            queries.append(f"{term} stars:>10")
+        else:
+            queries.append(f"{term} stars:>10")
+
+        try:
+            repos = search_repositories(queries, per_page=30, pause_seconds=0)
+        except GitHubApiError as exc:
+            QMessageBox.warning(self, "搜索失败", str(exc))
+            repos = []
+        finally:
+            self.search_button.setEnabled(True)
+            self.search_button.setText("搜索")
+
+        self.results = repos[:30]
+        for repo in self.results:
+            item = QListWidgetItem()
+            item.setToolTip(repo.description or repo.full_name)
+            self.result_list.addItem(item)
+            widget = SearchResultWidget(repo)
+            item.setSizeHint(widget.sizeHint())
+            self.result_list.setItemWidget(item, widget)
+        self.status_label.setText(f"找到 {len(self.results)} 个结果")
+
+    def _toggle_result_item(self, item: QListWidgetItem) -> None:
+        widget = self.result_list.itemWidget(item)
+        if isinstance(widget, SearchResultWidget):
+            widget.toggle_checked()
+
+    def _set_all_checked(self, checked: bool) -> None:
+        for index in range(self.result_list.count()):
+            item = self.result_list.item(index)
+            widget = self.result_list.itemWidget(item)
+            if isinstance(widget, SearchResultWidget):
+                widget.checkbox.setChecked(checked)
+
+
 class RadarReader(QMainWindow):
     def __init__(self, config_path: str | Path = "radar.toml") -> None:
         super().__init__()
+        self.setObjectName("RadarReader")
+        font_family = _preferred_font_family()
+        if font_family:
+            QApplication.setFont(QFont(font_family, 9))
         self.settings = load_settings(config_path)
+        self._set_window_icon()
         self.conn = db.connect(self.settings.db_path)
         db.init_db(self.conn)
         self.scored: list[ScoredRepository] = []
@@ -98,38 +493,47 @@ class RadarReader(QMainWindow):
         self.current: ScoredRepository | None = None
 
         self.setWindowTitle("GitHub Radar 阅读器")
-        self.resize(1180, 760)
+        self.resize(1600, 820)
+        self.setMinimumSize(1200, 680)
         self._build_ui()
+        self._apply_style()
         self.reload_data()
+
+    def _set_window_icon(self) -> None:
+        icon_path = self.settings.project_root / "assets" / "app-icon.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
 
     def _build_ui(self) -> None:
         toolbar = QToolBar("工具")
+        toolbar.setObjectName("MainToolBar")
         toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(16, 16))
         self.addToolBar(toolbar)
 
         refresh_action = QAction("刷新数据", self)
-        refresh_action.triggered.connect(self.reload_data)
+        refresh_action.triggered.connect(self.prompt_refresh_data)
         toolbar.addAction(refresh_action)
-
-        collect_action = QAction("采集并刷新", self)
-        collect_action.triggered.connect(self.collect_and_reload)
-        toolbar.addAction(collect_action)
 
         import_action = QAction("导入仓库", self)
         import_action.triggered.connect(self.import_repository)
         toolbar.addAction(import_action)
 
-        next_action = QAction("下一条", self)
-        next_action.setShortcut("Ctrl+N")
-        next_action.triggered.connect(self.next_item)
-        toolbar.addAction(next_action)
+        topic_import_action = QAction("搜索 Repo", self)
+        topic_import_action.triggered.connect(self.import_by_topic)
+        toolbar.addAction(topic_import_action)
 
         random_action = QAction("随便看看", self)
         random_action.setShortcut("Ctrl+R")
         random_action.triggered.connect(self.random_item)
         toolbar.addAction(random_action)
 
+        settings_action = QAction("设置", self)
+        settings_action.triggered.connect(self.open_settings)
+        toolbar.addAction(settings_action)
+
         self.status = QStatusBar()
+        self.status.setObjectName("Status")
         self.setStatusBar(self.status)
 
         root = QSplitter(Qt.Horizontal)
@@ -137,13 +541,17 @@ class RadarReader(QMainWindow):
         self.setCentralWidget(root)
 
         left = QWidget()
+        left.setFixedWidth(200)
+        left.setObjectName("Sidebar")
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(10, 10, 10, 10)
-        left_layout.setSpacing(8)
+        left_layout.setContentsMargins(12, 16, 10, 16)
+        left_layout.setSpacing(10)
 
-        left_layout.addWidget(QLabel("筛选"))
+        filter_title = QLabel("筛选")
+        filter_title.setObjectName("PanelTitle")
+        left_layout.addWidget(filter_title)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("搜索名称、简介、语言、topics")
+        self.search.setPlaceholderText("搜索名称、简介、语言...")
         self.search.textChanged.connect(lambda *_args: self.apply_filters())
         left_layout.addWidget(self.search)
 
@@ -176,31 +584,54 @@ class RadarReader(QMainWindow):
         self.only_unmarked = QCheckBox("只看未标记")
         self.only_unmarked.stateChanged.connect(self.toggle_unmarked_filter)
         left_layout.addWidget(self.only_unmarked)
-
-        self.repo_list = QListWidget()
-        self.repo_list.currentRowChanged.connect(self.show_current)
-        left_layout.addWidget(self.repo_list, 1)
+        left_layout.addStretch(1)
         root.addWidget(left)
 
+        middle = QWidget()
+        middle.setObjectName("RepoPane")
+        middle.setMinimumWidth(380)
+        middle_layout = QVBoxLayout(middle)
+        middle_layout.setContentsMargins(14, 16, 14, 16)
+        middle_layout.setSpacing(10)
+
+        repo_title = QLabel("项目")
+        repo_title.setObjectName("PanelTitle")
+        middle_layout.addWidget(repo_title)
+
+        self.repo_list = QListWidget()
+        self.repo_list.setObjectName("RepoList")
+        self.repo_list.setSpacing(6)
+        self.repo_list.setMouseTracking(True)
+        self.repo_list.setItemDelegate(RepoListDelegate(self.repo_list))
+        self.repo_list.currentRowChanged.connect(self.show_current)
+        middle_layout.addWidget(self.repo_list, 1)
+        root.addWidget(middle)
+
         right = QWidget()
+        right.setObjectName("Content")
+        right.setMinimumWidth(620)
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(12, 10, 12, 10)
+        right_layout.setContentsMargins(18, 16, 18, 14)
+        right_layout.setSpacing(12)
 
         self.title = QLabel("选择一个项目")
+        self.title.setObjectName("RepoTitle")
         self.title.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.title.setStyleSheet("font-size: 20px; font-weight: 600;")
         right_layout.addWidget(self.title)
 
         self.detail = QTextBrowser()
+        self.detail.setObjectName("Detail")
         self.detail.setOpenExternalLinks(True)
         right_layout.addWidget(self.detail, 1)
 
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         self.auto_next = QCheckBox("标记后自动下一条")
         self.auto_next.setChecked(True)
         buttons.addWidget(self.auto_next)
 
         self.next_button = QPushButton("下一条")
+        self.next_button.setObjectName("SecondaryButton")
         self.next_button.clicked.connect(self.next_item)
         buttons.addWidget(self.next_button)
 
@@ -212,17 +643,21 @@ class RadarReader(QMainWindow):
             ("少看这类", -2, "hidden"),
         ]:
             button = QPushButton(label)
+            button.setProperty("feedback", tag)
             button.clicked.connect(lambda checked=False, s=signal, t=tag: self.record_feedback(s, t))
             buttons.addWidget(button)
 
         self.open_button = QPushButton("打开 GitHub")
+        self.open_button.setObjectName("PrimaryButton")
         self.open_button.clicked.connect(self.open_current)
         buttons.addWidget(self.open_button)
         right_layout.addLayout(buttons)
 
         tag_row = QHBoxLayout()
-        tag_row.setSpacing(6)
-        tag_row.addWidget(QLabel("标签"))
+        tag_row.setSpacing(8)
+        tag_label = QLabel("标签")
+        tag_label.setObjectName("FieldLabel")
+        tag_row.addWidget(tag_label)
 
         self.tag_pills = QWidget()
         self.tag_pills_layout = QHBoxLayout(self.tag_pills)
@@ -242,13 +677,231 @@ class RadarReader(QMainWindow):
         tag_row.addWidget(self.tag_input, 1)
 
         self.add_tag_button = QPushButton("+")
+        self.add_tag_button.setObjectName("IconButton")
         self.add_tag_button.setToolTip("添加标签")
         self.add_tag_button.clicked.connect(self.add_current_tags)
         tag_row.addWidget(self.add_tag_button)
         right_layout.addLayout(tag_row)
 
         root.addWidget(right)
-        root.setSizes([370, 810])
+        root.setSizes([200, 450, 950])
+        root.setStretchFactor(0, 0)
+        root.setStretchFactor(1, 0)
+        root.setStretchFactor(2, 1)
+
+    def _apply_style(self) -> None:
+        self.setStyleSheet(
+            """
+            QMainWindow#RadarReader {
+                background: #f5f7fb;
+                color: #172033;
+                font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+                font-size: 13px;
+            }
+            QToolBar#MainToolBar {
+                background: #ffffff;
+                border: 0;
+                border-bottom: 1px solid #dfe5ef;
+                spacing: 6px;
+                padding: 8px 10px;
+            }
+            QToolButton {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 6px;
+                color: #334155;
+                padding: 6px 10px;
+                font-weight: 500;
+            }
+            QToolButton:hover {
+                background: #eef5ff;
+                border-color: #c8daf7;
+                color: #1557a6;
+            }
+            QWidget#Sidebar {
+                background: #f8fafc;
+                border-right: 1px solid #dfe5ef;
+            }
+            QWidget#RepoPane {
+                background: #f8fafc;
+                border-right: 1px solid #dfe5ef;
+            }
+            QWidget#Content {
+                background: #ffffff;
+            }
+            QLabel#PanelTitle {
+                color: #0f172a;
+                font-size: 16px;
+                font-weight: 700;
+                padding-bottom: 2px;
+            }
+            QLabel#RepoTitle {
+                color: #0f172a;
+                font-size: 22px;
+                font-weight: 700;
+                padding: 2px 0 4px 0;
+            }
+            QLabel#FieldLabel {
+                color: #475569;
+                font-weight: 600;
+            }
+            QLabel#MutedText {
+                color: #64748b;
+                line-height: 1.4;
+            }
+            QLineEdit, QComboBox {
+                background: #ffffff;
+                border: 1px solid #cfd8e6;
+                border-radius: 7px;
+                min-height: 30px;
+                padding: 4px 9px;
+                color: #172033;
+                selection-background-color: #cfe4ff;
+            }
+            QLineEdit:focus, QComboBox:focus {
+                border: 1px solid #4f8edc;
+                background: #fbfdff;
+            }
+            QComboBox::drop-down {
+                border: 0;
+                width: 24px;
+            }
+            QCheckBox {
+                color: #334155;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 15px;
+                height: 15px;
+                border-radius: 4px;
+                border: 1px solid #b9c5d6;
+                background: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background: #2563eb;
+                border-color: #2563eb;
+            }
+            QListWidget#RepoList {
+                background: #f8fafc;
+                border: 0;
+                outline: 0;
+            }
+            QListWidget#SearchResultList {
+                background: #ffffff;
+                border: 1px solid #e0e7f1;
+                border-radius: 8px;
+                outline: 0;
+            }
+            QListWidget#SearchResultList::item {
+                border: 0;
+                padding: 0;
+            }
+            QListWidget#SearchResultList::item:hover {
+                background: #f3f8ff;
+            }
+            QListWidget#SearchResultList::item:selected {
+                background: #eaf3ff;
+                color: #0f172a;
+            }
+            QWidget#SearchResultRow {
+                background: transparent;
+                color: #0f172a;
+            }
+            QLabel#SearchResultTitle {
+                color: #0f172a;
+                font-weight: 700;
+            }
+            QLabel#SearchResultMeta {
+                color: #334155;
+                font-size: 12px;
+            }
+            QLabel#SearchResultDescription {
+                color: #475569;
+                font-size: 12px;
+            }
+            QCheckBox#SearchResultCheck::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid #94a3b8;
+                background: #ffffff;
+            }
+            QCheckBox#SearchResultCheck::indicator:checked {
+                background: #2563eb;
+                border-color: #2563eb;
+            }
+            QTextBrowser#Detail {
+                background: #ffffff;
+                border: 1px solid #e0e7f1;
+                border-radius: 8px;
+                padding: 14px;
+                color: #1f2937;
+            }
+            QPushButton {
+                background: #ffffff;
+                border: 1px solid #cfd8e6;
+                border-radius: 7px;
+                color: #1f2937;
+                min-height: 28px;
+                padding: 5px 12px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background: #f3f8ff;
+                border-color: #9fc3f2;
+            }
+            QPushButton#PrimaryButton {
+                background: #2563eb;
+                border-color: #2563eb;
+                color: #ffffff;
+                font-weight: 700;
+            }
+            QPushButton#PrimaryButton:hover {
+                background: #1d4ed8;
+                border-color: #1d4ed8;
+            }
+            QPushButton#SecondaryButton {
+                background: #f8fafc;
+            }
+            QPushButton#IconButton {
+                min-width: 30px;
+                max-width: 30px;
+                padding: 4px 0;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            QPushButton[feedback="liked"] {
+                background: #ecfdf5;
+                border-color: #b7ead1;
+                color: #047857;
+            }
+            QPushButton[feedback="saved"] {
+                background: #fff7ed;
+                border-color: #fed7aa;
+                color: #9a3412;
+            }
+            QPushButton[feedback="read"] {
+                background: #f1f5f9;
+                border-color: #d7e0ea;
+                color: #475569;
+            }
+            QPushButton[feedback="disliked"] {
+                background: #fff1f2;
+                border-color: #fecdd3;
+                color: #be123c;
+            }
+            QPushButton[feedback="hidden"] {
+                background: #f5f3ff;
+                border-color: #ddd6fe;
+                color: #6d28d9;
+            }
+            QStatusBar#Status {
+                background: #ffffff;
+                border-top: 1px solid #dfe5ef;
+                color: #64748b;
+            }
+            """
+        )
 
     def reload_data(self) -> None:
         repos = db.load_recent_repositories(self.conn, limit=500)
@@ -259,6 +912,15 @@ class RadarReader(QMainWindow):
         self._populate_tags()
         self.apply_filters()
         self.status.showMessage(f"已载入 {len(self.scored)} 个项目", 5000)
+
+    def prompt_refresh_data(self) -> None:
+        dialog = RefreshDataDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        if dialog.should_fetch_from_github():
+            self.collect_and_reload()
+        else:
+            self.reload_data()
 
     def collect_and_reload(self) -> None:
         self.status.showMessage("正在采集 GitHub 数据...")
@@ -281,33 +943,96 @@ class RadarReader(QMainWindow):
         self.reload_data()
 
     def import_repository(self) -> None:
-        full_name, ok = QInputDialog.getText(
-            self,
-            "导入仓库",
-            "输入 GitHub 仓库名（owner/name）：",
-        )
-        full_name = full_name.strip()
-        if not ok or not full_name:
-            return
-        self.status.showMessage(f"正在导入 {full_name} ...")
-        QApplication.processEvents()
-        try:
-            repo = fetch_repository(full_name)
-            db.upsert_repositories(self.conn, [repo])
-        except GitHubApiError as exc:
-            QMessageBox.warning(self, "导入失败", str(exc))
+        dialog = BatchImportDialog(self)
+        if dialog.exec() != QDialog.Accepted:
             return
 
-        self._prompt_tags_for_import(repo.full_name)
+        names = dialog.repo_names()
+        if not names:
+            self.status.showMessage("没有输入可导入的仓库", 3000)
+            return
+
+        self.status.showMessage(f"正在导入 {len(names)} 个仓库...")
+        QApplication.processEvents()
+
+        imported: list[Repository] = []
+        failures: list[tuple[str, str]] = []
+        for index, full_name in enumerate(names, start=1):
+            self.status.showMessage(f"正在导入 {index}/{len(names)}：{full_name}")
+            QApplication.processEvents()
+            try:
+                imported.append(fetch_repository(full_name))
+            except GitHubApiError as exc:
+                failures.append((full_name, str(exc)))
+
+        if not imported:
+            message = "\n".join(f"- {name}: {error}" for name, error in failures[:8])
+            QMessageBox.warning(self, "导入失败", message or "没有仓库导入成功")
+            return
+
+        db.upsert_repositories(self.conn, imported)
+        tags = dialog.tags()
+        if tags:
+            for repo in imported:
+                db.add_repository_tags(self.conn, repo.full_name, tags)
+
         self.reload_data()
-        self.apply_filters(preferred_name=repo.full_name)
-        item = self._find_scored(repo.full_name)
+        self.apply_filters(preferred_name=imported[0].full_name)
         self._prepare_tag_input()
+
+        summary = [f"已导入 {len(imported)} 个仓库。"]
+        if tags:
+            summary.append(f"已添加标签：{', '.join(sorted({tag.lower() for tag in tags}))}")
+        if failures:
+            summary.append("")
+            summary.append(f"失败 {len(failures)} 个：")
+            summary.extend(f"- {name}: {error}" for name, error in failures[:8])
+            if len(failures) > 8:
+                summary.append(f"... 还有 {len(failures) - 8} 个失败项")
         QMessageBox.information(
             self,
             "导入完成",
-            self._import_summary(item, repo.full_name),
+            "\n".join(summary),
         )
+
+    def import_by_topic(self) -> None:
+        dialog = TopicImportDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        repos = dialog.selected_repositories()
+        if not repos:
+            self.status.showMessage("没有选择要导入的仓库", 3000)
+            return
+
+        term = _clean_search_topic(dialog.search_term()) or dialog.search_term().strip().lower()
+        self.status.showMessage(f"正在导入 {len(repos)} 个仓库...")
+        QApplication.processEvents()
+
+        db.upsert_repositories(self.conn, repos)
+        if term:
+            for repo in repos:
+                db.add_repository_tags(self.conn, repo.full_name, [term])
+
+        preferred_name = repos[0].full_name
+        self.reload_data()
+        self.apply_filters(preferred_name=preferred_name)
+        QMessageBox.information(
+            self,
+            "导入完成",
+            f"已导入 {len(repos)} 个仓库。"
+            + (f"\n已自动添加标签：{term}" if term else ""),
+        )
+
+    def open_settings(self) -> None:
+        dialog = SettingsDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            token = dialog.github_token()
+            save_github_token(self.settings.project_root, token)
+            self.settings = load_settings(self.settings.project_root / "radar.toml")
+            if token:
+                self.status.showMessage("GitHub Token 已保存到项目 .env", 5000)
+            else:
+                self.status.showMessage("GitHub Token 已清除", 5000)
 
     def apply_filters(self, preferred_name: str | None = None, preferred_row: int | None = None) -> None:
         selected_name = preferred_name
@@ -380,13 +1105,32 @@ class RadarReader(QMainWindow):
             return
         repo = self.current.repo
         current_row = self.repo_list.currentRow()
-        db.add_feedback(self.conn, [repo.full_name], signal=signal, tags=[tag])
-        self.feedback_by_repo[repo.full_name] = tag
-        self.status.showMessage(f"已标记为“{FEEDBACK_LABELS[tag]}”：{repo.full_name}", 5000)
-        if self.auto_next.isChecked():
-            self.apply_filters(preferred_row=current_row)
+        previous_tag = self.feedback_by_repo.get(repo.full_name)
+        is_clearing = previous_tag == tag
+        if is_clearing:
+            db.add_feedback(self.conn, [repo.full_name], signal=0, tags=[])
+            self.feedback_by_repo.pop(repo.full_name, None)
+            self.status.showMessage(f"已取消“{FEEDBACK_LABELS[tag]}”标记：{repo.full_name}", 5000)
         else:
-            self.apply_filters(preferred_name=repo.full_name)
+            db.add_feedback(self.conn, [repo.full_name], signal=signal, tags=[tag])
+            self.feedback_by_repo[repo.full_name] = tag
+            self.status.showMessage(f"已标记为“{FEEDBACK_LABELS[tag]}”：{repo.full_name}", 5000)
+        if self.auto_next.isChecked():
+            feedback_filter = self.feedback_filter.currentData()
+            if is_clearing:
+                current_stays_visible = feedback_filter in ("all", "unmarked")
+            else:
+                current_stays_visible = feedback_filter in ("all", tag)
+            next_row = current_row + 1 if current_stays_visible else current_row
+            self.apply_filters(preferred_row=next_row)
+        else:
+            feedback_filter = self.feedback_filter.currentData()
+            if is_clearing and feedback_filter not in ("all", "unmarked"):
+                self.apply_filters(preferred_row=current_row)
+            elif not is_clearing and feedback_filter == "unmarked":
+                self.apply_filters(preferred_row=current_row)
+            else:
+                self.apply_filters(preferred_name=repo.full_name)
 
     def add_current_tags(self) -> None:
         if self.current is None:
@@ -608,6 +1352,7 @@ class RadarReader(QMainWindow):
     def _load_latest_feedback(self) -> dict[str, str]:
         latest: dict[str, str] = {}
         for item in reversed(db.load_feedback(self.conn)):
+            latest.pop(item.full_name, None)
             for tag in item.tags:
                 if tag in FEEDBACK_LABELS:
                     latest[item.full_name] = tag
@@ -628,11 +1373,9 @@ class RadarReader(QMainWindow):
             f"{tag_text}"
         )
         widget_item = QListWidgetItem(label)
+        widget_item.setSizeHint(QSize(320, 64))
         widget_item.setToolTip(repo.description or repo.full_name)
-        if marker in FEEDBACK_COLORS:
-            background, foreground = FEEDBACK_COLORS[marker]
-            widget_item.setBackground(QBrush(QColor(background)))
-            widget_item.setForeground(QBrush(QColor(foreground)))
+        widget_item.setData(Qt.UserRole, marker or "")
         return widget_item
 
     def _detail_html(self, item: ScoredRepository) -> str:
@@ -647,6 +1390,48 @@ class RadarReader(QMainWindow):
         full_name = escape(repo.full_name)
         language = escape(repo.language or "未知")
         return f"""
+        <style>
+          body {{
+            color: #1f2937;
+            font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+            font-size: 14px;
+            line-height: 1.55;
+          }}
+          a {{
+            color: #2563eb;
+            text-decoration: none;
+            font-weight: 700;
+          }}
+          h2 {{
+            color: #0f172a;
+            font-size: 22px;
+            margin: 0 0 14px 0;
+          }}
+          h3 {{
+            color: #334155;
+            font-size: 14px;
+            font-weight: 700;
+            margin: 18px 0 7px 0;
+          }}
+          p {{
+            margin: 5px 0 10px 0;
+          }}
+          table {{
+            border-collapse: collapse;
+            margin-top: 8px;
+            width: 100%;
+          }}
+          td {{
+            border-bottom: 1px solid #e5eaf2;
+            padding: 8px 10px;
+            vertical-align: top;
+          }}
+          td:first-child {{
+            background: #f8fafc;
+            color: #475569;
+            width: 116px;
+          }}
+        </style>
         <h2><a href="{escape(repo.html_url)}">{full_name}</a></h2>
         <h3>项目概述</h3>
         <p>{summary}</p>
@@ -716,6 +1501,50 @@ class RadarReader(QMainWindow):
 
 def _split_tags(value: str) -> list[str]:
     return [tag.strip() for tag in re.split(r"[,，;；\s]+", value) if tag.strip()]
+
+
+def _parse_repo_names(value: str) -> list[str]:
+    seen: set[str] = set()
+    names: list[str] = []
+    for raw_line in value.splitlines():
+        line = raw_line.strip().strip(",;")
+        if not line:
+            continue
+        match = re.search(r"github\.com[/:]([^/\s]+)/([^/\s#?]+)", line, flags=re.I)
+        if match:
+            candidate = f"{match.group(1)}/{match.group(2)}"
+        else:
+            candidate = line
+        candidate = candidate.strip().strip("/")
+        candidate = re.sub(r"\.git$", "", candidate, flags=re.I)
+        if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", candidate):
+            continue
+        key = candidate.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(candidate)
+    return names
+
+
+def _clean_search_topic(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9_.-]+", "-", value.strip().lower())
+    return cleaned.strip("-")
+
+
+def _preferred_font_family() -> str:
+    families = set(QFontDatabase.families())
+    for family in [
+        "Microsoft YaHei UI",
+        "Microsoft YaHei",
+        "Noto Sans CJK SC",
+        "Source Han Sans SC",
+        "SimHei",
+        "Segoe UI",
+    ]:
+        if family in families:
+            return family
+    return ""
 
 
 def main(argv: list[str] | None = None) -> int:

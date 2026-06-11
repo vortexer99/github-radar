@@ -38,7 +38,13 @@ def build_interest_weights(conn: sqlite3.Connection) -> dict[str, float]:
     repos = {repo.full_name: repo for repo in db.load_recent_repositories(conn, limit=1000)}
     weights: Counter[str] = Counter()
 
+    latest_feedback = {}
     for item in db.load_feedback(conn):
+        latest_feedback.setdefault(item.full_name, item)
+
+    for item in latest_feedback.values():
+        if not item.tags:
+            continue
         repo = repos.get(item.full_name)
         if repo is None:
             continue

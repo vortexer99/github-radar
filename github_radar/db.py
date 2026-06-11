@@ -178,15 +178,10 @@ def load_repository(conn: sqlite3.Connection, full_name: str) -> Repository | No
 
 def repository_stats(conn: sqlite3.Connection) -> dict[str, object]:
     total = int(conn.execute("SELECT count(*) FROM repositories").fetchone()[0])
-    marked = int(
-        conn.execute(
-            """
-            SELECT count(DISTINCT full_name)
-            FROM feedback
-            WHERE tags_json != '[]'
-            """
-        ).fetchone()[0]
-    )
+    latest_feedback: dict[str, list[str]] = {}
+    for item in load_feedback(conn):
+        latest_feedback.setdefault(item.full_name, item.tags)
+    marked = sum(1 for tags in latest_feedback.values() if tags)
     languages = conn.execute(
         """
         SELECT coalesce(nullif(language, ''), '未知') AS language, count(*) AS count
@@ -196,17 +191,10 @@ def repository_stats(conn: sqlite3.Connection) -> dict[str, object]:
         LIMIT 5
         """
     ).fetchall()
-    feedback = conn.execute(
-        """
-        SELECT tags_json, count(*) AS count
-        FROM feedback
-        GROUP BY tags_json
-        """
-    ).fetchall()
     feedback_counts: dict[str, int] = {}
-    for row in feedback:
-        for tag in json.loads(row["tags_json"] or "[]"):
-            feedback_counts[tag] = feedback_counts.get(tag, 0) + int(row["count"])
+    for tags in latest_feedback.values():
+        for tag in tags:
+            feedback_counts[tag] = feedback_counts.get(tag, 0) + 1
     tag_rows = conn.execute(
         """
         SELECT tag, count(*) AS count

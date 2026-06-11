@@ -2,6 +2,10 @@ data/*.db
 data/*.db-*
 reports/*.md
 archive/h5/web/radar.json
+build/
+dist/
+*.spec
 __pycache__/
 *.pyc
 .venv/
+.env
