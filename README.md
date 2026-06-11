@@ -12,7 +12,7 @@ GitHub Radar is a local-first radar for trending GitHub repositories. It can per
 
 This is a personal project by vortexer99 and evolves mainly around personal usage needs. No long-term maintenance, support, or compatibility guarantee is promised. Feature requests can be filed as issues.
 
-当前版本 / Current version: `1.0.1`
+当前版本 / Current version: `1.0.2`
 
 变更日志 / Changelog: [CHANGELOG.md](CHANGELOG.md)
 
