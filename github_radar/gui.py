@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 import webbrowser
 import random
@@ -11,6 +10,7 @@ import re
 
 from . import db
 from . import __version__
+from .cli import run_collection
 from .github_api import GitHubApiError, fetch_repository, search_repositories
 from .models import Repository, ScoredRepository
 from .scorer import score_all_repositories
@@ -925,21 +925,17 @@ class RadarReader(QMainWindow):
     def collect_and_reload(self) -> None:
         self.status.showMessage("正在采集 GitHub 数据...")
         QApplication.processEvents()
-        command = [
-            sys.executable,
-            "-m",
-            "github_radar",
-            "run",
-            "--config",
-            str(self.settings.project_root / "radar.toml"),
-            "--limit",
-            "300",
-        ]
         try:
-            subprocess.run(command, cwd=self.settings.project_root, check=True)
-        except subprocess.CalledProcessError as exc:
-            QMessageBox.warning(self, "采集失败", f"命令退出码：{exc.returncode}")
+            report_path = run_collection(self.settings, self.conn, limit=300)
+        except GitHubApiError as exc:
+            QMessageBox.warning(self, "采集失败", str(exc))
+            self.status.showMessage("GitHub 采集失败", 5000)
             return
+        except Exception as exc:
+            QMessageBox.warning(self, "采集失败", f"{type(exc).__name__}: {exc}")
+            self.status.showMessage("GitHub 采集失败", 5000)
+            return
+        self.status.showMessage(f"GitHub 采集完成：{report_path}", 5000)
         self.reload_data()
 
     def import_repository(self) -> None:

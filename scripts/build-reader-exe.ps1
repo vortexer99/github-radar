@@ -8,15 +8,15 @@ Set-Location -LiteralPath $ProjectRoot
 & $Python -m PyInstaller `
     --noconfirm `
     --clean `
+    --onefile `
     --windowed `
     --name GitHubRadarReader `
     --icon "assets\app-icon.ico" `
     --paths "." `
-    --add-data "radar.toml:." `
     "scripts\reader_launcher.py"
 
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Write-Host "Built: $ProjectRoot\dist\GitHubRadarReader\GitHubRadarReader.exe"
+Write-Host "Built: $ProjectRoot\dist\GitHubRadarReader.exe"

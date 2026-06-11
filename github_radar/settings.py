@@ -24,6 +24,33 @@ DEFAULT_QUERY_TEMPLATES = [
 ]
 
 
+DEFAULT_CONFIG_TEXT = """# GitHub Radar local configuration.
+# GitHub Token can be configured in the reader settings or with GITHUB_TOKEN.
+
+db_path = "data/radar.db"
+report_dir = "reports"
+min_stars = 100
+per_page = 50
+created_within_days = 45
+pushed_within_days = 14
+exploration_ratio = 0.25
+
+languages = []
+excluded_terms = []
+
+query_templates = [
+  "created:>{created_since} stars:>{min_stars}",
+  "pushed:>{pushed_since} stars:>{min_stars}",
+  "topic:ai pushed:>{pushed_since} stars:>{min_stars}",
+  "topic:llm pushed:>{pushed_since} stars:>{min_stars}",
+  "topic:developer-tools pushed:>{pushed_since} stars:>{min_stars}",
+  "topic:security pushed:>{pushed_since} stars:>{min_stars}",
+  "topic:database pushed:>{pushed_since} stars:>{min_stars}",
+  "topic:cli pushed:>{pushed_since} stars:>{min_stars}"
+]
+"""
+
+
 @dataclass(frozen=True)
 class Settings:
     project_root: Path
@@ -59,7 +86,15 @@ class Settings:
 
 def load_settings(config_path: str | Path | None = None) -> Settings:
     project_root = Path.cwd()
-    path = Path(config_path) if config_path else project_root / "radar.toml"
+    if config_path:
+        path = Path(config_path)
+        if not path.is_absolute():
+            path = project_root / path
+        project_root = path.parent
+    else:
+        path = project_root / "radar.toml"
+    ensure_default_config(path)
+
     data: dict[str, Any] = {}
     if path.exists():
         if tomllib is None:
@@ -85,6 +120,13 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         query_templates=[str(item) for item in data.get("query_templates", DEFAULT_QUERY_TEMPLATES)],
         github_token=os.getenv("GITHUB_TOKEN", ""),
     )
+
+
+def ensure_default_config(path: Path) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
 
 
 def _resolve_path(root: Path, value: str | Path) -> Path:

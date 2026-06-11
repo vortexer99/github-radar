@@ -7,12 +7,15 @@ from . import db
 from .github_api import GitHubApiError, fetch_repository, search_repositories
 from .report import write_markdown_report
 from .scorer import score_all_repositories, score_repositories
-from .settings import load_settings
+from .settings import ensure_default_config, load_settings
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "init-config":
+        return init_config(args)
+
     settings = load_settings(args.config)
 
     conn = db.connect(settings.db_path)
@@ -64,7 +67,20 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("--config", default=None, help="Path to radar.toml.")
     import_parser.add_argument("repos", nargs="+", help="Repositories in owner/name format.")
 
+    init_parser = sub.add_parser("init-config", help="Create a default radar.toml.")
+    init_parser.add_argument("--config", default="radar.toml", help="Path to radar.toml.")
+
     return parser
+
+
+def init_config(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    path = Path(args.config)
+    existed = path.exists()
+    ensure_default_config(path)
+    print(f"{'Existing' if existed else 'Created'} config: {path}")
+    return 0
 
 
 def collect(args: argparse.Namespace, settings, conn) -> int:
@@ -132,20 +148,28 @@ def import_repo(args: argparse.Namespace, settings, conn) -> int:
 
 
 def run(args: argparse.Namespace, settings, conn) -> int:
+    try:
+        path = run_collection(settings, conn, limit=args.limit)
+        print(path)
+        return 0
+    except GitHubApiError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+def run_collection(settings, conn, limit: int = 300):
     run_id = db.start_run(conn)
     try:
         repos = search_repositories(settings.expanded_queries(), per_page=settings.per_page)
         count = db.upsert_repositories(conn, repos)
-        recent = db.load_recent_repositories(conn, limit=args.limit)
+        recent = db.load_recent_repositories(conn, limit=limit)
         scored = score_repositories(conn, recent, settings)
         path = write_markdown_report(scored, settings.report_dir)
         db.finish_run(conn, run_id, status="ok", repos_seen=count, report_path=str(path))
-        print(path)
-        return 0
+        return path
     except GitHubApiError as exc:
         db.finish_run(conn, run_id, status="error", repos_seen=0, message=str(exc))
-        print(str(exc), file=sys.stderr)
-        return 2
+        raise
 
 
 if __name__ == "__main__":
