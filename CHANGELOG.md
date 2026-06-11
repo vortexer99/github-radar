@@ -22,6 +22,7 @@ All notable changes to GitHub Radar are documented here.
 - Updated distribution docs to recommend shipping `README.md`, `GitHubRadarReader.exe`, and `run-radar.ps1`.
 - Removed bundled `radar.toml` from the exe build; runtime config is now created next to the app.
 - Reader GitHub refresh now shows the actual API or runtime error instead of only exit code `2`.
+- Windows reader packaging now validates PySide6 bundling and fails if the exe is unexpectedly small.
 
 ## [1.0.0] - 2026-06-11
 

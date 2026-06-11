@@ -29,12 +29,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e .
+          python -m pip install "PySide6>=6.7"
           python -m pip install pyinstaller
 
       - name: Build reader exe
         shell: pwsh
         run: |
           .\scripts\build-reader-exe.ps1 -ProjectRoot $PWD.Path -Python python
+
+      - name: Verify reader exe
+        shell: pwsh
+        run: |
+          $exe = Get-Item -LiteralPath "dist\GitHubRadarReader.exe"
+          Write-Host "GitHubRadarReader.exe size: $([math]::Round($exe.Length / 1MB, 2)) MB"
+          if ($exe.Length -lt 25MB) {
+            throw "GitHubRadarReader.exe is unexpectedly small; PySide6/Qt was probably not bundled."
+          }
 
       - name: Prepare release package
         shell: pwsh
