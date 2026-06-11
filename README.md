@@ -43,6 +43,12 @@ This is a personal project by vortexer99 and evolves mainly around personal usag
 
 ## 快速开始 / Quick Start
 
+如果只是日常使用，建议优先使用 exe 桌面阅读器；它是主要界面，支持筛选、标记、标签、导入、搜索和设置。详见 [桌面阅读器](#桌面阅读器--desktop-reader)。  
+For daily use, the recommended entry point is the exe desktop reader. It is the primary UI for filtering, marking, tagging, importing, searching, and settings. See [Desktop Reader](#桌面阅读器--desktop-reader).
+
+如果从源码运行采集和报告。  
+If running collection and reports from source:
+
 ```powershell
 cd path\to\github-radar
 python -m pip install -e .
@@ -169,6 +175,9 @@ python -m github_radar import-repo owner/repo another/repo
 
 默认脚本会在周一和周四 06:00 运行。  
 The default script creates a task that runs on Monday and Thursday at 06:00.
+
+这个功能依赖 Windows 计划任务；脚本会调用 Task Scheduler 注册定时任务，并按计划运行 `scripts\run-radar.ps1`。如果不是 Windows，或者不想使用计划任务，请用系统自带的定时器，例如 cron、systemd timer 或其他任务调度工具，定时执行 `python -m github_radar run --config radar.toml`。  
+This feature depends on Windows Task Scheduler. The script registers a scheduled task that runs `scripts\run-radar.ps1`. On non-Windows systems, or if you do not want to use Task Scheduler, use your system scheduler such as cron, systemd timers, or another task runner to execute `python -m github_radar run --config radar.toml`.
 
 ```powershell
 cd path\to\github-radar
