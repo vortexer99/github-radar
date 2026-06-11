@@ -1,7 +1,7 @@
 [project]
 name = "github-radar"
-version = "0.1.0"
-description = "Personal GitHub hot project radar with feedback learning and Markdown reports."
+version = "1.0.0"
+description = "Personal GitHub hot project radar with a local desktop reader, feedback learning, tags, and Markdown reports."
 requires-python = ">=3.10"
 dependencies = [
   "PySide6>=6.7",
