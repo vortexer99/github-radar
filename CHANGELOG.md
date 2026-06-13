@@ -4,6 +4,10 @@ All notable changes to GitHub Radar are documented here.
 
 ## [1.0.2] - 2026-06-12
 
+### Changed
+
+- Manual repository imports now appear in a dedicated "手动导入" section in the reader and Markdown reports.
+
 ### Fixed
 
 - Fixed Windows CI packaging so PySide6/Qt is bundled into `GitHubRadarReader.exe`.
