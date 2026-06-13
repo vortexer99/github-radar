@@ -1031,7 +1031,12 @@ class RadarReader(QMainWindow):
             else:
                 self.status.showMessage("GitHub Token 已清除", 5000)
 
-    def apply_filters(self, preferred_name: str | None = None, preferred_row: int | None = None) -> None:
+    def apply_filters(
+        self,
+        preferred_name: str | None = None,
+        preferred_row: int | None = None,
+        keep_name: str | None = None,
+    ) -> None:
         selected_name = preferred_name
         if selected_name is None:
             selected_name = self.current.repo.full_name if self.current else ""
@@ -1051,7 +1056,7 @@ class RadarReader(QMainWindow):
                 continue
             if language != "all" and (repo.language or "未知") != language:
                 continue
-            if feedback == "unmarked" and repo_feedback is not None:
+            if feedback == "unmarked" and repo_feedback is not None and repo.full_name != keep_name:
                 continue
             if feedback not in ("all", "unmarked") and repo_feedback != feedback:
                 continue
@@ -1117,15 +1122,16 @@ class RadarReader(QMainWindow):
             if is_clearing:
                 current_stays_visible = feedback_filter in ("all", "unmarked")
             else:
-                current_stays_visible = feedback_filter in ("all", tag)
+                current_stays_visible = feedback_filter in ("all", "unmarked", tag)
             next_row = current_row + 1 if current_stays_visible else current_row
-            self.apply_filters(preferred_row=next_row)
+            keep_name = repo.full_name if not is_clearing and feedback_filter == "unmarked" else None
+            self.apply_filters(preferred_row=next_row, keep_name=keep_name)
         else:
             feedback_filter = self.feedback_filter.currentData()
             if is_clearing and feedback_filter not in ("all", "unmarked"):
                 self.apply_filters(preferred_row=current_row)
             elif not is_clearing and feedback_filter == "unmarked":
-                self.apply_filters(preferred_row=current_row)
+                self.apply_filters(preferred_row=current_row, keep_name=repo.full_name)
             else:
                 self.apply_filters(preferred_name=repo.full_name)
 
