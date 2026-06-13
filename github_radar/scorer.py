@@ -60,9 +60,14 @@ def assign_sections(
     if not scored:
         return []
 
+    manual = [item for item in scored if item.repo.query.startswith("manual:")]
+    manual_names = {item.repo.full_name for item in manual}
+    used = set(manual_names)
+
     positive_interest = [item for item in scored if item.interest_score > 0.05]
+    positive_interest = [item for item in positive_interest if item.repo.full_name not in used]
     personalized = positive_interest[:personalized_count]
-    used = {item.repo.full_name for item in personalized}
+    used.update(item.repo.full_name for item in personalized)
 
     remaining = [item for item in scored if item.repo.full_name not in used]
     explore_target = max(exploration_count, int(len(scored) * exploration_ratio))
@@ -77,13 +82,15 @@ def assign_sections(
     other = [item for item in scored if item.repo.full_name not in used][:other_count]
 
     result: list[ScoredRepository] = []
+    result.extend(_with_section(manual, "manual"))
     result.extend(_with_section(personalized, "personalized"))
     result.extend(_with_section(exploration, "exploration"))
     result.extend(_with_section(other, "other"))
 
     if not personalized:
+        warmup_candidates = [item for item in scored if item.repo.full_name not in manual_names]
         warmup = sorted(
-            scored,
+            warmup_candidates,
             key=lambda item: (
                 _newness(item.repo.created_at),
                 item.recency_score + item.growth_score,

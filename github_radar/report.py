@@ -9,6 +9,7 @@ from .summarizer import summarize_repository
 
 
 SECTION_TITLES = {
+    "manual": "手动导入",
     "personalized": "你可能感兴趣",
     "exploration": "探索推荐",
     "other": "其他热门项目",
@@ -51,7 +52,7 @@ def render_markdown(
         "",
     ]
 
-    for section in ["personalized", "exploration", "other"]:
+    for section in ["manual", "personalized", "exploration", "other"]:
         items = sections.get(section, [])
         if not items:
             continue

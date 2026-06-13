@@ -54,6 +54,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 
 SECTION_LABELS = {
     "all": "全部",
+    "manual": "手动导入",
     "personalized": "你可能感兴趣",
     "exploration": "探索推荐",
     "other": "其他热门",
