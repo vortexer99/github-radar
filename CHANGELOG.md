@@ -8,6 +8,7 @@ All notable changes to GitHub Radar are documented here.
 
 - Manual repository imports now appear in a dedicated "手动导入" section in the reader and Markdown reports.
 - Marking an item while filtering to unmarked repositories no longer immediately removes it from the current list.
+- Updated the application icon with a brighter, higher-contrast design for better desktop and taskbar recognition.
 
 ### Fixed
 
