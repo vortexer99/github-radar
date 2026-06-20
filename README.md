@@ -82,6 +82,8 @@ python -m github_radar.gui
 
 Open "设置" / "Settings", then fill in the token on the GitHub tab. The token is saved to the project-level `.env` file, which is ignored by Git.
 
+API calls use credentials in this order: token saved in Settings, `gh auth token`, `GH_TOKEN` / `GITHUB_TOKEN`, then anonymous GitHub API requests.
+
 方式二：使用环境变量。
 
 Option 2: use an environment variable.
@@ -301,9 +303,9 @@ run-radar.ps1
 
 `GitHubRadarReader.exe` comes from `dist\GitHubRadarReader.exe`. Put `run-radar.ps1` next to the exe. It prefers the reader exe's `--run` mode for collection and falls back to source mode only when the exe is not found. This keeps the reader's GitHub refresh and scheduled script collection on the same collection logic.
 
-首次运行会在运行目录自动创建默认 `radar.toml`；`data\radar.db`、`reports\` 和数据库表也会按需自动创建。用户只需要在阅读器“设置”里填写 GitHub Token，或设置 `GITHUB_TOKEN` 环境变量。
+首次运行会在运行目录自动创建默认 `radar.toml`；`data\radar.db`、`reports\` 和数据库表也会按需自动创建。用户只需要在阅读器“设置”里填写 GitHub Token，登录 `gh`，或设置 `GH_TOKEN` / `GITHUB_TOKEN` 环境变量。
 
-On first run, the app creates a default `radar.toml` in the runtime directory. `data\radar.db`, `reports\`, and database tables are also created as needed. Users only need to set a GitHub Token in the reader settings or through the `GITHUB_TOKEN` environment variable.
+On first run, the app creates a default `radar.toml` in the runtime directory. `data\radar.db`, `reports\`, and database tables are also created as needed. Users only need to set a GitHub Token in the reader settings, log in with `gh`, or set a `GH_TOKEN` / `GITHUB_TOKEN` environment variable.
 
 ## 配置 / Configuration
 

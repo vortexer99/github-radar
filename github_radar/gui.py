@@ -11,7 +11,7 @@ import re
 from . import db
 from . import __version__
 from .cli import run_collection
-from .github_api import GitHubApiError, fetch_repository, search_repositories
+from .github_api import GitHubApiError, fetch_repository, last_auth_source, search_repositories
 from .models import Repository, ScoredRepository
 from .scorer import score_all_repositories
 from .settings import load_settings, save_github_token
@@ -189,6 +189,7 @@ class SettingsDialog(QDialog):
 
         hint = QLabel(
             "Token 会保存到项目根目录的 .env 文件，采集和导入仓库时自动使用。"
+            "认证优先级：当前项目 Token > gh 登录凭据 > GH_TOKEN / GITHUB_TOKEN > 匿名 API。"
             "留空并保存可以清除当前项目 Token。"
         )
         hint.setWordWrap(True)
@@ -444,7 +445,12 @@ class TopicImportDialog(QDialog):
             queries.append(f"{term} stars:>10")
 
         try:
-            repos = search_repositories(queries, per_page=30, pause_seconds=0)
+            repos = search_repositories(
+                queries,
+                per_page=30,
+                token=self.reader.settings.github_token,
+                pause_seconds=0,
+            )
         except GitHubApiError as exc:
             QMessageBox.warning(self, "搜索失败", str(exc))
             repos = []
@@ -460,7 +466,7 @@ class TopicImportDialog(QDialog):
             widget = SearchResultWidget(repo)
             item.setSizeHint(widget.sizeHint())
             self.result_list.setItemWidget(item, widget)
-        self.status_label.setText(f"找到 {len(self.results)} 个结果")
+        self.status_label.setText(f"找到 {len(self.results)} 个结果（认证：{_auth_source_label()}）")
 
     def _toggle_result_item(self, item: QListWidgetItem) -> None:
         widget = self.result_list.itemWidget(item)
@@ -936,7 +942,7 @@ class RadarReader(QMainWindow):
             QMessageBox.warning(self, "采集失败", f"{type(exc).__name__}: {exc}")
             self.status.showMessage("GitHub 采集失败", 5000)
             return
-        self.status.showMessage(f"GitHub 采集完成：{report_path}", 5000)
+        self.status.showMessage(f"GitHub 采集完成（认证：{_auth_source_label()}）：{report_path}", 5000)
         self.reload_data()
 
     def import_repository(self) -> None:
@@ -958,12 +964,14 @@ class RadarReader(QMainWindow):
             self.status.showMessage(f"正在导入 {index}/{len(names)}：{full_name}")
             QApplication.processEvents()
             try:
-                imported.append(fetch_repository(full_name))
+                imported.append(fetch_repository(full_name, token=self.settings.github_token))
             except GitHubApiError as exc:
                 failures.append((full_name, str(exc)))
 
         if not imported:
             message = "\n".join(f"- {name}: {error}" for name, error in failures[:8])
+            if message:
+                message += f"\n\n认证方式：{_auth_source_label()}"
             QMessageBox.warning(self, "导入失败", message or "没有仓库导入成功")
             return
 
@@ -978,6 +986,7 @@ class RadarReader(QMainWindow):
         self._prepare_tag_input()
 
         summary = [f"已导入 {len(imported)} 个仓库。"]
+        summary.append(f"认证方式：{_auth_source_label()}")
         if tags:
             summary.append(f"已添加标签：{', '.join(sorted({tag.lower() for tag in tags}))}")
         if failures:
@@ -1533,6 +1542,17 @@ def _parse_repo_names(value: str) -> list[str]:
 def _clean_search_topic(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9_.-]+", "-", value.strip().lower())
     return cleaned.strip("-")
+
+
+def _auth_source_label() -> str:
+    labels = {
+        "Settings token": "设置 Token",
+        "GitHub CLI login": "GitHub CLI 登录凭据",
+        "GH_TOKEN environment variable": "GH_TOKEN 环境变量",
+        "GITHUB_TOKEN environment variable": "GITHUB_TOKEN 环境变量",
+        "anonymous API": "匿名 API",
+    }
+    return labels.get(last_auth_source(), last_auth_source())
 
 
 def _preferred_font_family() -> str:

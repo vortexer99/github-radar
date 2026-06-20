@@ -102,7 +102,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
         project_root = path.parent
 
-    load_project_env(project_root / ".env")
+    project_env = load_project_env(project_root / ".env")
     db_path = _resolve_path(project_root, data.get("db_path", "data/radar.db"))
     report_dir = _resolve_path(project_root, data.get("report_dir", "reports"))
 
@@ -118,7 +118,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         languages=[str(item) for item in data.get("languages", [])],
         excluded_terms=[str(item).lower() for item in data.get("excluded_terms", [])],
         query_templates=[str(item) for item in data.get("query_templates", DEFAULT_QUERY_TEMPLATES)],
-        github_token=os.getenv("GITHUB_TOKEN", ""),
+        github_token=project_env.get("GITHUB_TOKEN", ""),
     )
 
 
@@ -136,18 +136,23 @@ def _resolve_path(root: Path, value: str | Path) -> Path:
     return root / path
 
 
-def load_project_env(path: Path) -> None:
+def load_project_env(path: Path) -> dict[str, str]:
+    loaded: dict[str, str] = {}
     if not path.exists():
-        return
+        return loaded
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
-        if not key or key in os.environ:
+        if not key:
             continue
-        os.environ[key] = _decode_env_value(value.strip())
+        decoded_value = _decode_env_value(value.strip())
+        loaded[key] = decoded_value
+        if key not in os.environ:
+            os.environ[key] = decoded_value
+    return loaded
 
 
 def save_github_token(project_root: Path, token: str) -> None:
@@ -156,11 +161,14 @@ def save_github_token(project_root: Path, token: str) -> None:
     if env_path.exists():
         existing = env_path.read_text(encoding="utf-8").splitlines()
 
+    previous_token = ""
     token_line = f'GITHUB_TOKEN="{_escape_env_value(token.strip())}"'
     wrote_token = False
     lines: list[str] = []
     for line in existing:
         if line.strip().startswith("GITHUB_TOKEN="):
+            _, old_value = line.split("=", 1)
+            previous_token = _decode_env_value(old_value.strip())
             if token.strip():
                 lines.append(token_line)
             wrote_token = True
@@ -176,7 +184,7 @@ def save_github_token(project_root: Path, token: str) -> None:
 
     if token.strip():
         os.environ["GITHUB_TOKEN"] = token.strip()
-    else:
+    elif previous_token and os.getenv("GITHUB_TOKEN") == previous_token:
         os.environ.pop("GITHUB_TOKEN", None)
 
 

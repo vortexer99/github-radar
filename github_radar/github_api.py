@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
+from dataclasses import dataclass
 from typing import Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -12,10 +14,23 @@ from .models import Repository
 
 
 API_ROOT = "https://api.github.com"
+_LAST_AUTH_SOURCE = "anonymous API"
+
+
+@dataclass(frozen=True)
+class _CredentialCandidate:
+    source: str
+    token: str | None
 
 
 class GitHubApiError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def last_auth_source() -> str:
+    return _LAST_AUTH_SOURCE
 
 
 def search_repositories(
@@ -25,7 +40,8 @@ def search_repositories(
     token: str | None = None,
     pause_seconds: float = 6.2,
 ) -> list[Repository]:
-    token = token or os.getenv("GITHUB_TOKEN")
+    candidates = _credential_candidates(token)
+    active_token = candidates[0].token
     seen: set[str] = set()
     repos: list[Repository] = []
     query_list = list(queries)
@@ -39,8 +55,9 @@ def search_repositories(
                 "order": "desc",
                 "per_page": str(per_page),
             },
-            token=token,
+            candidates=candidates,
         )
+        active_token = candidates[0].token
         for item in payload.get("items", []):
             full_name = item.get("full_name", "")
             if not full_name or full_name in seen:
@@ -49,14 +66,14 @@ def search_repositories(
             repos.append(_repo_from_item(item, query))
 
         # Unauthenticated GitHub search is rate-limited to a small per-minute bucket.
-        if token is None and index < len(query_list) - 1:
+        if active_token is None and index < len(query_list) - 1:
             time.sleep(pause_seconds)
 
     return repos
 
 
 def fetch_repository(full_name: str, *, token: str | None = None) -> Repository:
-    token = token or os.getenv("GITHUB_TOKEN")
+    candidates = _credential_candidates(token)
     clean_name = full_name.strip().strip("/")
     if "/" not in clean_name:
         raise GitHubApiError("Repository must be in owner/name format.")
@@ -66,12 +83,33 @@ def fetch_repository(full_name: str, *, token: str | None = None) -> Repository:
     payload = _request_json(
         f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}",
         {},
-        token=token,
+        candidates=candidates,
     )
     return _repo_from_item(payload, f"manual:{payload.get('full_name', clean_name)}")
 
 
-def _request_json(path: str, params: dict[str, str], *, token: str | None) -> dict:
+def _request_json(path: str, params: dict[str, str], *, candidates: list[_CredentialCandidate]) -> dict:
+    global _LAST_AUTH_SOURCE
+    last_auth_error: GitHubApiError | None = None
+    for candidate in list(candidates):
+        _LAST_AUTH_SOURCE = candidate.source
+        try:
+            payload = _request_json_with_token(path, params, token=candidate.token)
+            if candidates and candidates[0] != candidate:
+                candidates.remove(candidate)
+                candidates.insert(0, candidate)
+            return payload
+        except GitHubApiError as exc:
+            if not _can_retry_without_credential(exc):
+                raise
+            last_auth_error = exc
+            continue
+    if last_auth_error is not None:
+        raise last_auth_error
+    raise GitHubApiError("No GitHub API credential candidates available.")
+
+
+def _request_json_with_token(path: str, params: dict[str, str], *, token: str | None) -> dict:
     query = f"?{urlencode(params)}" if params else ""
     url = f"{API_ROOT}{path}{query}"
     headers = {
@@ -88,9 +126,54 @@ def _request_json(path: str, params: dict[str, str], *, token: str | None) -> di
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise GitHubApiError(f"GitHub API returned {exc.code}: {body}") from exc
+        raise GitHubApiError(f"GitHub API returned {exc.code}: {body}", status_code=exc.code) from exc
     except URLError as exc:
         raise GitHubApiError(f"GitHub API request failed: {exc}") from exc
+
+
+def _credential_candidates(preferred_token: str | None) -> list[_CredentialCandidate]:
+    candidates: list[_CredentialCandidate] = []
+    seen: set[str] = set()
+
+    def add(source: str, token: str | None) -> None:
+        cleaned = token.strip() if token else ""
+        if not cleaned:
+            return
+        if cleaned in seen:
+            return
+        seen.add(cleaned)
+        candidates.append(_CredentialCandidate(source, cleaned))
+
+    add("Settings token", preferred_token)
+    add("GitHub CLI login", _gh_auth_token())
+    add("GH_TOKEN environment variable", os.getenv("GH_TOKEN"))
+    add("GITHUB_TOKEN environment variable", os.getenv("GITHUB_TOKEN"))
+    candidates.append(_CredentialCandidate("anonymous API", None))
+    return candidates
+
+
+def _gh_auth_token() -> str | None:
+    try:
+        kwargs = {}
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        completed = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            **kwargs,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip() or None
+
+
+def _can_retry_without_credential(error: GitHubApiError) -> bool:
+    return error.status_code in {401, 403}
 
 
 def _repo_from_item(item: dict, query: str) -> Repository:

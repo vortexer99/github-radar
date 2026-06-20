@@ -2,6 +2,13 @@
 
 All notable changes to GitHub Radar are documented here.
 
+## [1.0.4] - 2026-06-20
+
+### Added
+
+- Added GitHub API credential fallback from Settings token to GitHub CLI login, environment variables, and anonymous API requests.
+- Added reader and CLI status messages showing which GitHub authentication source was used.
+
 ## [1.0.3] - 2026-06-14
 
 ### Changed

@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from . import db
-from .github_api import GitHubApiError, fetch_repository, search_repositories
+from .github_api import GitHubApiError, fetch_repository, last_auth_source, search_repositories
 from .report import write_markdown_report
 from .scorer import score_all_repositories, score_repositories
 from .settings import ensure_default_config, load_settings
@@ -90,9 +90,10 @@ def collect(args: argparse.Namespace, settings, conn) -> int:
             print(query)
         return 0
 
-    repos = search_repositories(queries, per_page=settings.per_page)
+    repos = search_repositories(queries, per_page=settings.per_page, token=settings.github_token)
     count = db.upsert_repositories(conn, repos)
     print(f"Collected {count} repositories into {settings.db_path}")
+    print(f"GitHub auth: {last_auth_source()}")
     return 0
 
 
@@ -121,7 +122,7 @@ def import_repo(args: argparse.Namespace, settings, conn) -> int:
     imported = []
     try:
         for full_name in args.repos:
-            repo = fetch_repository(full_name)
+            repo = fetch_repository(full_name, token=settings.github_token)
             db.upsert_repositories(conn, [repo])
             stored = db.load_repository(conn, repo.full_name)
             if stored:
@@ -144,6 +145,7 @@ def import_repo(args: argparse.Namespace, settings, conn) -> int:
         f"marked={stats['marked_repositories']}, "
         f"top_languages={stats['top_languages']}"
     )
+    print(f"GitHub auth: {last_auth_source()}")
     return 0
 
 
@@ -151,6 +153,7 @@ def run(args: argparse.Namespace, settings, conn) -> int:
     try:
         path = run_collection(settings, conn, limit=args.limit)
         print(path)
+        print(f"GitHub auth: {last_auth_source()}")
         return 0
     except GitHubApiError as exc:
         print(str(exc), file=sys.stderr)
@@ -160,7 +163,11 @@ def run(args: argparse.Namespace, settings, conn) -> int:
 def run_collection(settings, conn, limit: int = 300):
     run_id = db.start_run(conn)
     try:
-        repos = search_repositories(settings.expanded_queries(), per_page=settings.per_page)
+        repos = search_repositories(
+            settings.expanded_queries(),
+            per_page=settings.per_page,
+            token=settings.github_token,
+        )
         count = db.upsert_repositories(conn, repos)
         recent = db.load_recent_repositories(conn, limit=limit)
         scored = score_repositories(conn, recent, settings)
