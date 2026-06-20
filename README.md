@@ -82,6 +82,8 @@ python -m github_radar.gui
 
 Open "设置" / "Settings", then fill in the token on the GitHub tab. The token is saved to the project-level `.env` file, which is ignored by Git.
 
+API 调用会按以下顺序选择认证方式：设置中保存的 Token、`gh auth token`、`GH_TOKEN` / `GITHUB_TOKEN`，最后是匿名 GitHub API 请求。
+
 API calls use credentials in this order: token saved in Settings, `gh auth token`, `GH_TOKEN` / `GITHUB_TOKEN`, then anonymous GitHub API requests.
 
 方式二：使用环境变量。
