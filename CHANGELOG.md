@@ -2,6 +2,20 @@
 
 All notable changes to GitHub Radar are documented here.
 
+## [1.1.0] - 2026-06-21
+
+### Added
+
+- Reworked the Settings dialog into a "采集" tab that edits all collection parameters in the UI (min stars, per-query count, created/pushed windows, exploration ratio, languages, downranked keywords, topics, and query templates), with a field-help dialog and write-back to `radar.toml`.
+- Added a `topics` config key plus topic↔query-template conversion, so editing topics regenerates the default queries.
+- Added a "检查更新" action on the About tab that compares the local version against the latest GitHub release.
+- Added a "只看已标记" filter alongside the existing unmarked filter.
+- Added a status-bar progress bar with live per-query messages when fetching from GitHub; collection now runs on a background thread so the window stays responsive.
+
+### Changed
+
+- Bumped the minimum Python version to 3.11.
+
 ## [1.0.5] - 2026-06-21
 
 ### Added

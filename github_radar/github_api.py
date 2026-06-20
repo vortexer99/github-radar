@@ -6,7 +6,7 @@ import socket
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -52,14 +52,18 @@ def search_repositories(
     per_page: int = 50,
     token: str | None = None,
     pause_seconds: float = 6.2,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> list[Repository]:
     candidates = _credential_candidates(token)
     active_token = candidates[0].token
     seen: set[str] = set()
     repos: list[Repository] = []
     query_list = list(queries)
+    total = len(query_list)
 
     for index, query in enumerate(query_list):
+        if progress_callback is not None:
+            progress_callback(index, total, query)
         payload = _request_json(
             "/search/repositories",
             {
@@ -99,6 +103,21 @@ def fetch_repository(full_name: str, *, token: str | None = None) -> Repository:
         candidates=candidates,
     )
     return _repo_from_item(payload, f"manual:{payload.get('full_name', clean_name)}")
+
+
+def fetch_latest_release(repo: str, *, token: str | None = None) -> dict:
+    candidates = _credential_candidates(token)
+    clean_name = repo.strip().strip("/")
+    if "/" not in clean_name:
+        raise GitHubApiError("Repository must be in owner/name format.")
+    owner, name = clean_name.split("/", 1)
+    if not owner or not name:
+        raise GitHubApiError("Repository must be in owner/name format.")
+    return _request_json(
+        f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/releases/latest",
+        {},
+        candidates=candidates,
+    )
 
 
 def _request_json(path: str, params: dict[str, str], *, candidates: list[_CredentialCandidate]) -> dict:

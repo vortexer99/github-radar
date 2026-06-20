@@ -23,9 +23,18 @@ DEFAULT_QUERY_TEMPLATES = [
     "topic:cli pushed:>{pushed_since} stars:>{min_stars}",
 ]
 
+DEFAULT_TOPICS = [
+    "ai",
+    "llm",
+    "developer-tools",
+    "security",
+    "database",
+    "cli",
+]
+
 
 DEFAULT_CONFIG_TEXT = """# GitHub Radar local configuration.
-# GitHub Token can be configured in the reader settings or with GITHUB_TOKEN.
+# GitHub Token can be configured in the reader settings, gh, GH_TOKEN, or GITHUB_TOKEN.
 
 db_path = "data/radar.db"
 report_dir = "reports"
@@ -37,6 +46,7 @@ exploration_ratio = 0.25
 
 languages = []
 excluded_terms = []
+topics = ["ai", "llm", "developer-tools", "security", "database", "cli"]
 
 query_templates = [
   "created:>{created_since} stars:>{min_stars}",
@@ -63,6 +73,7 @@ class Settings:
     exploration_ratio: float = 0.25
     languages: list[str] = field(default_factory=list)
     excluded_terms: list[str] = field(default_factory=list)
+    topics: list[str] = field(default_factory=lambda: DEFAULT_TOPICS.copy())
     query_templates: list[str] = field(default_factory=lambda: DEFAULT_QUERY_TEMPLATES.copy())
     github_token: str = ""
 
@@ -105,6 +116,12 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
     project_env = load_project_env(project_root / ".env")
     db_path = _resolve_path(project_root, data.get("db_path", "data/radar.db"))
     report_dir = _resolve_path(project_root, data.get("report_dir", "reports"))
+    topics = [str(item).lower() for item in data.get("topics", [])]
+    query_templates = [str(item) for item in data.get("query_templates", [])]
+    if not query_templates:
+        query_templates = query_templates_from_topics(topics or DEFAULT_TOPICS)
+    if not topics:
+        topics = topics_from_query_templates(query_templates)
 
     return Settings(
         project_root=project_root,
@@ -117,7 +134,8 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         exploration_ratio=float(data.get("exploration_ratio", 0.25)),
         languages=[str(item) for item in data.get("languages", [])],
         excluded_terms=[str(item).lower() for item in data.get("excluded_terms", [])],
-        query_templates=[str(item) for item in data.get("query_templates", DEFAULT_QUERY_TEMPLATES)],
+        topics=topics,
+        query_templates=query_templates,
         github_token=project_env.get("GITHUB_TOKEN", ""),
     )
 
@@ -188,6 +206,64 @@ def save_github_token(project_root: Path, token: str) -> None:
         os.environ.pop("GITHUB_TOKEN", None)
 
 
+def save_collection_settings(
+    settings: Settings,
+    *,
+    min_stars: int,
+    per_page: int,
+    created_within_days: int,
+    pushed_within_days: int,
+    exploration_ratio: float,
+    languages: list[str],
+    excluded_terms: list[str],
+    topics: list[str],
+    query_templates: list[str],
+) -> None:
+    config_path = settings.project_root / "radar.toml"
+    lines = [
+        "# GitHub Radar local configuration.",
+        "# GitHub Token can be configured in the reader settings, gh, GH_TOKEN, or GITHUB_TOKEN.",
+        "",
+        f'db_path = "{_toml_escape(_relative_or_absolute(settings.project_root, settings.db_path))}"',
+        f'report_dir = "{_toml_escape(_relative_or_absolute(settings.project_root, settings.report_dir))}"',
+        f"min_stars = {max(0, int(min_stars))}",
+        f"per_page = {max(1, min(100, int(per_page)))}",
+        f"created_within_days = {max(1, int(created_within_days))}",
+        f"pushed_within_days = {max(1, int(pushed_within_days))}",
+        f"exploration_ratio = {float(exploration_ratio):.3g}",
+        "",
+        f"languages = {_toml_string_list(languages)}",
+        f"excluded_terms = {_toml_string_list(excluded_terms)}",
+        f"topics = {_toml_string_list(topics)}",
+        "",
+        "query_templates = [",
+    ]
+    lines.extend(f'  "{_toml_escape(template)}",' for template in query_templates)
+    lines.extend(["]", ""])
+    config_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def topics_from_query_templates(query_templates: list[str]) -> list[str]:
+    topics: list[str] = []
+    for template in query_templates:
+        stripped = template.strip()
+        if not stripped.startswith("topic:"):
+            continue
+        topic = stripped[len("topic:") :].split(maxsplit=1)[0].strip()
+        if topic and topic not in topics:
+            topics.append(topic)
+    return topics
+
+
+def query_templates_from_topics(topics: list[str]) -> list[str]:
+    templates = [
+        "created:>{created_since} stars:>{min_stars}",
+        "pushed:>{pushed_since} stars:>{min_stars}",
+    ]
+    templates.extend(f"topic:{topic} pushed:>{{pushed_since}} stars:>{{min_stars}}" for topic in topics)
+    return templates
+
+
 def _decode_env_value(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         value = value[1:-1]
@@ -196,3 +272,19 @@ def _decode_env_value(value: str) -> str:
 
 def _escape_env_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', r"\"")
+
+
+def _toml_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', r"\"")
+
+
+def _toml_string_list(values: list[str]) -> str:
+    cleaned = [value.strip() for value in values if value.strip()]
+    return "[" + ", ".join(f'"{_toml_escape(value)}"' for value in cleaned) + "]"
+
+
+def _relative_or_absolute(root: Path, path: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)

@@ -11,14 +11,20 @@ import re
 from . import db
 from . import __version__
 from .cli import run_collection
-from .github_api import GitHubApiError, fetch_repository, last_auth_source, search_repositories
+from .github_api import GitHubApiError, fetch_latest_release, fetch_repository, last_auth_source, search_repositories
 from .models import Repository, ScoredRepository
 from .scorer import score_all_repositories
-from .settings import load_settings, save_github_token
+from .settings import (
+    load_settings,
+    query_templates_from_topics,
+    save_collection_settings,
+    save_github_token,
+    topics_from_query_templates,
+)
 from .summarizer import summarize_repository
 
 try:
-    from PySide6.QtCore import QSize, QStringListModel, Qt, QUrl
+    from PySide6.QtCore import QPoint, QRect, QSize, QStringListModel, Qt, QThread, QUrl, Signal
     from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPen
     from PySide6.QtWidgets import (
         QApplication,
@@ -27,6 +33,7 @@ try:
         QCompleter,
         QDialog,
         QDialogButtonBox,
+        QDoubleSpinBox,
         QFormLayout,
         QHBoxLayout,
         QLabel,
@@ -38,6 +45,10 @@ try:
         QPushButton,
         QInputDialog,
         QPlainTextEdit,
+        QLayout,
+        QProgressBar,
+        QSizePolicy,
+        QSpinBox,
         QStyledItemDelegate,
         QStyle,
         QSplitter,
@@ -50,6 +61,10 @@ try:
     )
 except ModuleNotFoundError as exc:  # pragma: no cover
     raise SystemExit("缺少 PySide6。请先运行：python -m pip install PySide6") from exc
+
+
+GITHUB_REPO = "vortexer99/github-radar"
+RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
 
 
 SECTION_LABELS = {
@@ -70,6 +85,7 @@ FEEDBACK_LABELS = {
 
 FEEDBACK_FILTERS = {
     "all": "全部标记",
+    "marked": "已标记",
     "unmarked": "未标记",
     **FEEDBACK_LABELS,
 }
@@ -81,6 +97,20 @@ FEEDBACK_COLORS = {
     "disliked": ("#fdecec", "#8f2f3f"),
     "hidden": ("#f4eefd", "#5b3b8c"),
 }
+
+TAG_PILL_STYLE = """
+QPushButton {
+    background: #eef2f7;
+    color: #334155;
+    border: 1px solid #d8dee9;
+    border-radius: 10px;
+    padding: 3px 8px;
+}
+QPushButton:hover {
+    background: #e2e8f0;
+    color: #0f172a;
+}
+"""
 
 SORT_OPTIONS = {
     "score_desc": "推荐分最高",
@@ -148,19 +178,211 @@ class RepoListDelegate(QStyledItemDelegate):
         return QSize(super().sizeHint(option, index).width(), 70)
 
 
+class FlowLayout(QLayout):
+    def __init__(self, parent: QWidget | None = None, margin: int = 0, spacing: int = 6) -> None:
+        super().__init__(parent)
+        self._items = []
+        self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+
+    def addItem(self, item) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientations(Qt.Orientation(0))
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect: QRect) -> None:
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+
+    def _do_layout(self, rect: QRect, *, test_only: bool) -> int:
+        margins = self.contentsMargins()
+        effective_rect = rect.adjusted(margins.left(), margins.top(), -margins.right(), -margins.bottom())
+        x = effective_rect.x()
+        y = effective_rect.y()
+        line_height = 0
+
+        for item in self._items:
+            widget = item.widget()
+            spacing_x = self.spacing()
+            spacing_y = self.spacing()
+            item_size = item.sizeHint()
+            next_x = x + item_size.width() + spacing_x
+            if next_x - spacing_x > effective_rect.right() and line_height > 0:
+                x = effective_rect.x()
+                y = y + line_height + spacing_y
+                next_x = x + item_size.width() + spacing_x
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), item_size))
+            x = next_x
+            line_height = max(line_height, item_size.height())
+
+        return y + line_height - rect.y() + margins.bottom()
+
+
+class TagEditor(QWidget):
+    def __init__(self, *, placeholder: str = "添加标签...") -> None:
+        super().__init__()
+        self._tags: list[str] = []
+        self.on_changed = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.pills = QWidget()
+        self.pills_layout = FlowLayout(self.pills, spacing=6)
+        self.pills.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        layout.addWidget(self.pills)
+
+        input_row = QHBoxLayout()
+        input_row.setContentsMargins(0, 0, 0, 0)
+        input_row.setSpacing(8)
+        self.input = QLineEdit()
+        self.input.setPlaceholderText(placeholder)
+        self.input.returnPressed.connect(self.add_from_input)
+        input_row.addWidget(self.input, 1)
+
+        self.add_button = QPushButton("+")
+        self.add_button.setObjectName("IconButton")
+        self.add_button.setToolTip("添加")
+        self.add_button.clicked.connect(self.add_from_input)
+        input_row.addWidget(self.add_button)
+        layout.addLayout(input_row)
+
+    def tags(self) -> list[str]:
+        return self._tags.copy()
+
+    def set_tags(self, tags: list[str]) -> None:
+        self._tags = []
+        self.add_tags(tags)
+
+    def add_from_input(self) -> None:
+        tags = _split_setting_values(self.input.text(), lower=True)
+        if not tags:
+            return
+        self.add_tags(tags)
+        self.input.clear()
+
+    def add_tags(self, tags: list[str]) -> None:
+        changed = False
+        for tag in tags:
+            cleaned = tag.strip().lower()
+            if not cleaned or cleaned in self._tags:
+                continue
+            self._tags.append(cleaned)
+            changed = True
+        if changed:
+            self._render()
+            self._notify_changed()
+
+    def remove_tag(self, tag: str) -> None:
+        self._tags = [existing for existing in self._tags if existing != tag]
+        self._render()
+        self._notify_changed()
+
+    def _render(self) -> None:
+        while self.pills_layout.count():
+            item = self.pills_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for tag in self._tags:
+            pill = QPushButton(f"{tag}  ×")
+            pill.setToolTip("点击移除")
+            pill.setCursor(Qt.PointingHandCursor)
+            pill.setStyleSheet(TAG_PILL_STYLE)
+            pill.clicked.connect(lambda checked=False, t=tag: self.remove_tag(t))
+            self.pills_layout.addWidget(pill)
+
+    def _notify_changed(self) -> None:
+        if self.on_changed is not None:
+            self.on_changed()
+
+
+COLLECTION_HELP_HTML = """
+<h3>采集设置说明</h3>
+<p>这些选项决定每次“从 GitHub 获取最新数据”时，去 GitHub 搜索哪些仓库、拉取多少。</p>
+
+<h4>基本选项</h4>
+<ul>
+<li><b>最低 stars</b>：只采集 star 数不低于这个值的仓库。调高更聚焦头部项目，调低能发现更早期的项目。</li>
+<li><b>每个查询拉取数量</b>：每条查询最多取回多少个仓库（1–100）。数值越大覆盖越广，但单次采集更慢、更耗 API 额度。</li>
+<li><b>创建于最近 N 天</b>：用于“最近新建”的查询，只看最近这么多天内创建的仓库。例如 45 表示关注近 45 天的新项目。</li>
+<li><b>更新于最近 N 天</b>：用于“最近活跃”的查询，只看最近这么多天内有过推送（更新）的仓库。例如 14 表示关注近两周仍在更新的项目。</li>
+<li><b>探索推荐比例</b>：报告里“探索推荐”一栏所占的比例（0–1）。比例越高，越多还没和你的偏好挂钩的新项目会被推到前面。</li>
+<li><b>限定语言</b>：只保留这些主力语言的仓库，用逗号分隔，例如 <code>Python, Rust, TypeScript</code>。留空表示不限语言。</li>
+<li><b>降权关键词</b>：命中这些词（出现在名称、简介、语言或 topics 中）的仓库会被压低排名，用逗号分隔，例如 <code>crypto, blockchain</code>。是降权，不是直接过滤掉。</li>
+</ul>
+
+<h4>Topic 列表</h4>
+<p>这里填 GitHub 的 topic（主题标签），例如 <code>ai</code>、<code>rust</code>、<code>developer-tools</code>。每个 topic 都会自动生成一条对应的查询模板。</p>
+
+<h4>查询模板（高级）</h4>
+<p>每行一条 GitHub 搜索语句，会直接发给 GitHub 搜索 API。模板里可以使用三个占位符，采集时自动替换：</p>
+<ul>
+<li><code>{min_stars}</code> → 上面“最低 stars”的值</li>
+<li><code>{created_since}</code> → 今天往前推“新建窗口天数”得到的日期（如 2026-05-07）</li>
+<li><code>{pushed_since}</code> → 今天往前推“更新窗口天数”得到的日期</li>
+</ul>
+<p>常见 GitHub 搜索写法：</p>
+<ul>
+<li><code>stars:&gt;100</code>：star 大于 100</li>
+<li><code>pushed:&gt;2026-06-01</code>：2026-06-01 之后有更新</li>
+<li><code>created:&gt;2026-05-01</code>：2026-05-01 之后创建</li>
+<li><code>topic:rust</code>：带有 rust 这个 topic</li>
+<li><code>language:python</code>：主语言是 Python</li>
+</ul>
+<p>提示：改动 Topic 列表会自动重写模板；但只要你手动编辑过模板，保存时就以你写的模板为准（点“按 Topic 生成”可重新按 Topic 覆盖）。</p>
+"""
+
+
 class SettingsDialog(QDialog):
     def __init__(self, reader: "RadarReader") -> None:
         super().__init__(reader)
         self.reader = reader
         self.setWindowTitle("设置")
-        self.resize(520, 360)
+        self.resize(760, 680)
+        self._syncing_templates = False
+        self._templates_user_edited = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
         tabs = QTabWidget()
-        tabs.addTab(self._github_tab(), "GitHub")
+        tabs.addTab(self._collection_tab(), "采集")
         tabs.addTab(self._about_tab(), "关于")
         layout.addWidget(tabs, 1)
 
@@ -172,31 +394,160 @@ class SettingsDialog(QDialog):
     def github_token(self) -> str:
         return self.token_input.text().strip()
 
-    def _github_tab(self) -> QWidget:
+    def collection_settings(self) -> dict:
+        topics = self.topics_editor.tags()
+        query_templates = _nonempty_lines(self.query_templates_input.toPlainText())
+        return {
+            "min_stars": self.min_stars_input.value(),
+            "per_page": self.per_page_input.value(),
+            "created_within_days": self.created_days_input.value(),
+            "pushed_within_days": self.pushed_days_input.value(),
+            "exploration_ratio": self.exploration_ratio_input.value(),
+            "languages": _split_setting_values(self.languages_input.text()),
+            "excluded_terms": _split_setting_values(self.excluded_terms_input.text(), lower=True),
+            "topics": topics,
+            "query_templates": query_templates or query_templates_from_topics(topics),
+        }
+
+    def _collection_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
+
         self.token_input = QLineEdit()
         self.token_input.setEchoMode(QLineEdit.Password)
         self.token_input.setPlaceholderText("ghp_... 或 fine-grained token")
         self.token_input.setText(self.reader.settings.github_token)
         form.addRow("GitHub Token", self.token_input)
+
+        self.min_stars_input = QSpinBox()
+        self.min_stars_input.setRange(0, 1_000_000)
+        self.min_stars_input.setValue(self.reader.settings.min_stars)
+        form.addRow("最低 stars（{min_stars}）", self.min_stars_input)
+
+        self.per_page_input = QSpinBox()
+        self.per_page_input.setRange(1, 100)
+        self.per_page_input.setValue(self.reader.settings.per_page)
+        form.addRow("每个查询拉取数量", self.per_page_input)
+
+        self.created_days_input = QSpinBox()
+        self.created_days_input.setRange(1, 3650)
+        self.created_days_input.setSuffix(" 天")
+        self.created_days_input.setValue(self.reader.settings.created_within_days)
+        form.addRow("创建于最近（{created_since}）", self.created_days_input)
+
+        self.pushed_days_input = QSpinBox()
+        self.pushed_days_input.setRange(1, 3650)
+        self.pushed_days_input.setSuffix(" 天")
+        self.pushed_days_input.setValue(self.reader.settings.pushed_within_days)
+        form.addRow("更新于最近（{pushed_since}）", self.pushed_days_input)
+
+        self.exploration_ratio_input = QDoubleSpinBox()
+        self.exploration_ratio_input.setRange(0.0, 1.0)
+        self.exploration_ratio_input.setSingleStep(0.05)
+        self.exploration_ratio_input.setDecimals(2)
+        self.exploration_ratio_input.setValue(self.reader.settings.exploration_ratio)
+        form.addRow("探索推荐比例", self.exploration_ratio_input)
+
+        self.languages_input = QLineEdit(", ".join(self.reader.settings.languages))
+        self.languages_input.setPlaceholderText("Python, Rust, TypeScript")
+        form.addRow("限定语言", self.languages_input)
+
+        self.excluded_terms_input = QLineEdit(", ".join(self.reader.settings.excluded_terms))
+        self.excluded_terms_input.setPlaceholderText("crypto, blockchain")
+        form.addRow("降权关键词", self.excluded_terms_input)
+
         layout.addLayout(form)
 
+        auth_hint = QLabel(
+            "不必特意申请 Token：匿名 API 也有一定额度，配置 Token 主要是提高速率上限、减少限流。"
+            "Token 会保存到项目根目录的 .env 文件。认证优先级：当前项目 Token > gh 登录凭据 > "
+            "GH_TOKEN / GITHUB_TOKEN > 匿名 API。留空并保存可以清除当前项目 Token。"
+        )
+        auth_hint.setWordWrap(True)
+        auth_hint.setObjectName("MutedText")
+        layout.addWidget(auth_hint)
+
+        topic_label = QLabel("Topic 列表")
+        topic_label.setObjectName("MutedText")
+        layout.addWidget(topic_label)
+        topics = self.reader.settings.topics or topics_from_query_templates(self.reader.settings.query_templates)
+        self.topics_editor = TagEditor(placeholder="添加 topic，例如 ai、rust、developer-tools")
+        self.topics_editor.set_tags(topics)
+        self.topics_editor.on_changed = self._topics_changed
+        layout.addWidget(self.topics_editor)
+
+        template_row = QHBoxLayout()
+        template_label = QLabel("查询模板（高级，每行一个）")
+        template_label.setObjectName("MutedText")
+        template_row.addWidget(template_label, 1)
+        regenerate_button = QPushButton("按 Topic 生成")
+        regenerate_button.clicked.connect(self._regenerate_query_templates)
+        template_row.addWidget(regenerate_button)
+        layout.addLayout(template_row)
+
+        self.query_templates_input = QPlainTextEdit()
+        self.query_templates_input.setPlainText("\n".join(self.reader.settings.query_templates))
+        self.query_templates_input.textChanged.connect(self._query_templates_changed)
+        layout.addWidget(self.query_templates_input, 1)
+
         hint = QLabel(
-            "Token 会保存到项目根目录的 .env 文件，采集和导入仓库时自动使用。"
-            "认证优先级：当前项目 Token > gh 登录凭据 > GH_TOKEN / GITHUB_TOKEN > 匿名 API。"
-            "留空并保存可以清除当前项目 Token。"
+            "Topic 会生成 topic:<name> pushed:>{pushed_since} stars:>{min_stars} 查询。"
+            "如果手动修改高级模板，保存时会以高级模板为准。"
         )
         hint.setWordWrap(True)
         hint.setObjectName("MutedText")
         layout.addWidget(hint)
-        layout.addStretch(1)
+
+        help_row = QHBoxLayout()
+        help_button = QPushButton("字段说明")
+        help_button.setObjectName("SecondaryButton")
+        help_button.clicked.connect(self._show_collection_help)
+        help_row.addWidget(help_button)
+        help_row.addStretch(1)
+        layout.addLayout(help_row)
         return tab
+
+    def _topics_changed(self) -> None:
+        if self._templates_user_edited:
+            return
+        self._set_query_templates_from_topics()
+
+    def _query_templates_changed(self) -> None:
+        if not self._syncing_templates:
+            self._templates_user_edited = True
+
+    def _regenerate_query_templates(self) -> None:
+        self._templates_user_edited = False
+        self._set_query_templates_from_topics()
+
+    def _set_query_templates_from_topics(self) -> None:
+        topics = self.topics_editor.tags()
+        self._syncing_templates = True
+        self.query_templates_input.setPlainText("\n".join(query_templates_from_topics(topics)))
+        self._syncing_templates = False
+
+    def _show_collection_help(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("采集设置说明")
+        dialog.resize(600, 520)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setHtml(COLLECTION_HELP_HTML)
+        layout.addWidget(browser, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def _about_tab(self) -> QWidget:
         tab = QWidget()
@@ -218,7 +569,7 @@ class SettingsDialog(QDialog):
         for label, value in [
             ("软件", "GitHub Radar 阅读器"),
             ("版本", __version__),
-            ("GitHub", '<a href="https://github.com/vortexer99/github-radar">vortexer99/github-radar</a>'),
+            ("GitHub", f'<a href="https://github.com/{GITHUB_REPO}">{GITHUB_REPO}</a>'),
             ("项目目录", str(self.reader.settings.project_root)),
             ("数据库", str(self.reader.settings.db_path)),
             ("报告目录", str(self.reader.settings.report_dir)),
@@ -233,8 +584,56 @@ class SettingsDialog(QDialog):
             value_label.setWordWrap(True)
             form.addRow(label, value_label)
         layout.addLayout(form)
+
+        self.update_button = QPushButton("检查更新")
+        self.update_button.setObjectName("SecondaryButton")
+        self.update_button.clicked.connect(self._check_for_updates)
+        update_row = QHBoxLayout()
+        update_row.addWidget(self.update_button)
+        update_row.addStretch(1)
+        layout.addLayout(update_row)
+
         layout.addStretch(1)
         return tab
+
+    def _check_for_updates(self) -> None:
+        self.update_button.setEnabled(False)
+        self.update_button.setText("检查中…")
+        QApplication.processEvents()
+        try:
+            data = fetch_latest_release(GITHUB_REPO, token=self.reader.settings.github_token)
+        except GitHubApiError as exc:
+            QMessageBox.warning(self, "检查更新", f"检查失败：{exc}")
+            return
+        except Exception as exc:
+            QMessageBox.warning(self, "检查更新", f"检查失败：{type(exc).__name__}: {exc}")
+            return
+        finally:
+            self.update_button.setText("检查更新")
+            self.update_button.setEnabled(True)
+
+        latest_tag = str(data.get("tag_name") or "").strip()
+        download_url = str(data.get("html_url") or "").strip() or RELEASES_URL
+        if latest_tag and _parse_version(latest_tag) > _parse_version(__version__):
+            dialog = QDialog(self)
+            dialog.setWindowTitle("检查更新")
+            dialog_layout = QVBoxLayout(dialog)
+            dialog_layout.setContentsMargins(18, 18, 18, 18)
+            dialog_layout.setSpacing(14)
+            label = QLabel(
+                f"发现新版本 <b>{latest_tag}</b>（当前 {__version__}）。<br><br>"
+                f'<a href="{download_url}">前往 GitHub 下载页面</a>'
+            )
+            label.setTextFormat(Qt.RichText)
+            label.setOpenExternalLinks(True)
+            label.setWordWrap(True)
+            dialog_layout.addWidget(label)
+            buttons = QDialogButtonBox(QDialogButtonBox.Close)
+            buttons.rejected.connect(dialog.reject)
+            dialog_layout.addWidget(buttons)
+            dialog.exec()
+        else:
+            QMessageBox.information(self, "检查更新", f"已是最新版本（{__version__}）。")
 
 
 class RefreshDataDialog(QDialog):
@@ -481,6 +880,41 @@ class TopicImportDialog(QDialog):
                 widget.checkbox.setChecked(checked)
 
 
+class CollectWorker(QThread):
+    progress = Signal(int, int, str)
+    finished_ok = Signal(str, str)
+    failed = Signal(str)
+
+    def __init__(self, settings, *, limit: int = 300) -> None:
+        super().__init__()
+        self.settings = settings
+        self.limit = limit
+
+    def run(self) -> None:  # noqa: D401 - QThread entry point
+        conn = None
+        try:
+            # SQLite connections can't be shared across threads, so the worker
+            # opens its own connection to the same database file.
+            conn = db.connect(self.settings.db_path)
+            db.init_db(conn)
+            path = run_collection(
+                self.settings,
+                conn,
+                limit=self.limit,
+                progress_callback=lambda current, total, message: self.progress.emit(
+                    current, total, message
+                ),
+            )
+            self.finished_ok.emit(str(path), _auth_source_label())
+        except GitHubApiError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # pragma: no cover - defensive
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+        finally:
+            if conn is not None:
+                conn.close()
+
+
 class RadarReader(QMainWindow):
     def __init__(self, config_path: str | Path = "radar.toml") -> None:
         super().__init__()
@@ -521,6 +955,7 @@ class RadarReader(QMainWindow):
         refresh_action = QAction("刷新数据", self)
         refresh_action.triggered.connect(self.prompt_refresh_data)
         toolbar.addAction(refresh_action)
+        self.refresh_action = refresh_action
 
         import_action = QAction("导入仓库", self)
         import_action.triggered.connect(self.import_repository)
@@ -541,7 +976,14 @@ class RadarReader(QMainWindow):
 
         self.status = QStatusBar()
         self.status.setObjectName("Status")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName("CollectProgress")
+        self.progress_bar.setMaximumWidth(220)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.hide()
+        self.status.addPermanentWidget(self.progress_bar)
         self.setStatusBar(self.status)
+        self._collect_worker: CollectWorker | None = None
 
         root = QSplitter(Qt.Horizontal)
         root.setChildrenCollapsible(False)
@@ -591,6 +1033,9 @@ class RadarReader(QMainWindow):
         self.only_unmarked = QCheckBox("只看未标记")
         self.only_unmarked.stateChanged.connect(self.toggle_unmarked_filter)
         left_layout.addWidget(self.only_unmarked)
+        self.only_marked = QCheckBox("只看已标记")
+        self.only_marked.stateChanged.connect(self.toggle_marked_filter)
+        left_layout.addWidget(self.only_marked)
         left_layout.addStretch(1)
         root.addWidget(left)
 
@@ -930,20 +1375,43 @@ class RadarReader(QMainWindow):
             self.reload_data()
 
     def collect_and_reload(self) -> None:
-        self.status.showMessage("正在采集 GitHub 数据...")
-        QApplication.processEvents()
-        try:
-            report_path = run_collection(self.settings, self.conn, limit=300)
-        except GitHubApiError as exc:
-            QMessageBox.warning(self, "采集失败", str(exc))
-            self.status.showMessage("GitHub 采集失败", 5000)
+        if self._collect_worker is not None and self._collect_worker.isRunning():
+            self.status.showMessage("正在采集中，请稍候…", 3000)
             return
-        except Exception as exc:
-            QMessageBox.warning(self, "采集失败", f"{type(exc).__name__}: {exc}")
-            self.status.showMessage("GitHub 采集失败", 5000)
-            return
-        self.status.showMessage(f"GitHub 采集完成（认证：{_auth_source_label()}）：{report_path}", 5000)
+
+        self.refresh_action.setEnabled(False)
+        self.progress_bar.setRange(0, 0)  # 未知总量时先显示忙碌动画
+        self.progress_bar.setValue(0)
+        self.progress_bar.show()
+        self.status.showMessage("正在连接 GitHub…")
+
+        worker = CollectWorker(self.settings, limit=300)
+        worker.progress.connect(self._on_collect_progress)
+        worker.finished_ok.connect(self._on_collect_finished)
+        worker.failed.connect(self._on_collect_failed)
+        worker.finished.connect(self._on_collect_done)
+        self._collect_worker = worker
+        worker.start()
+
+    def _on_collect_progress(self, current: int, total: int, message: str) -> None:
+        if total > 0:
+            self.progress_bar.setRange(0, total)
+            self.progress_bar.setValue(min(current, total))
+        self.status.showMessage(message)
+
+    def _on_collect_finished(self, report_path: str, auth_label: str) -> None:
+        self.status.showMessage(f"GitHub 采集完成（认证：{auth_label}）：{report_path}", 5000)
         self.reload_data()
+
+    def _on_collect_failed(self, message: str) -> None:
+        QMessageBox.warning(self, "采集失败", message)
+        self.status.showMessage("GitHub 采集失败", 5000)
+
+    def _on_collect_done(self) -> None:
+        self.progress_bar.hide()
+        self.progress_bar.setRange(0, 100)
+        self.refresh_action.setEnabled(True)
+        self._collect_worker = None
 
     def import_repository(self) -> None:
         dialog = BatchImportDialog(self)
@@ -1034,11 +1502,12 @@ class RadarReader(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             token = dialog.github_token()
             save_github_token(self.settings.project_root, token)
+            save_collection_settings(self.settings, **dialog.collection_settings())
             self.settings = load_settings(self.settings.project_root / "radar.toml")
             if token:
-                self.status.showMessage("GitHub Token 已保存到项目 .env", 5000)
+                self.status.showMessage("设置已保存，GitHub Token 已写入项目 .env", 5000)
             else:
-                self.status.showMessage("GitHub Token 已清除", 5000)
+                self.status.showMessage("设置已保存，GitHub Token 已清除", 5000)
 
     def apply_filters(
         self,
@@ -1067,7 +1536,9 @@ class RadarReader(QMainWindow):
                 continue
             if feedback == "unmarked" and repo_feedback is not None and repo.full_name != keep_name:
                 continue
-            if feedback not in ("all", "unmarked") and repo_feedback != feedback:
+            if feedback == "marked" and repo_feedback is None:
+                continue
+            if feedback not in ("all", "unmarked", "marked") and repo_feedback != feedback:
                 continue
             if tag_filter == "__untagged__" and repo_tags:
                 continue
@@ -1131,7 +1602,7 @@ class RadarReader(QMainWindow):
             if is_clearing:
                 current_stays_visible = feedback_filter in ("all", "unmarked")
             else:
-                current_stays_visible = feedback_filter in ("all", "unmarked", tag)
+                current_stays_visible = feedback_filter in ("all", "unmarked", "marked", tag)
             next_row = current_row + 1 if current_stays_visible else current_row
             keep_name = repo.full_name if not is_clearing and feedback_filter == "unmarked" else None
             self.apply_filters(preferred_row=next_row, keep_name=keep_name)
@@ -1279,13 +1750,26 @@ class RadarReader(QMainWindow):
         else:
             self.apply_filters()
 
+    def toggle_marked_filter(self, *_args) -> None:
+        target = "marked" if self.only_marked.isChecked() else "all"
+        index = self.feedback_filter.findData(target)
+        if index >= 0 and self.feedback_filter.currentIndex() != index:
+            self.feedback_filter.setCurrentIndex(index)
+        else:
+            self.apply_filters()
+
     def feedback_filter_changed(self, *_args) -> None:
-        should_check = self.feedback_filter.currentData() == "unmarked"
-        if self.only_unmarked.isChecked() != should_check:
-            self.only_unmarked.blockSignals(True)
-            self.only_unmarked.setChecked(should_check)
-            self.only_unmarked.blockSignals(False)
+        current = self.feedback_filter.currentData()
+        self._sync_checkbox(self.only_unmarked, current == "unmarked")
+        self._sync_checkbox(self.only_marked, current == "marked")
         self.apply_filters()
+
+    def _sync_checkbox(self, box: QCheckBox, checked: bool) -> None:
+        if box.isChecked() == checked:
+            return
+        box.blockSignals(True)
+        box.setChecked(checked)
+        box.blockSignals(False)
 
     def open_current(self) -> None:
         if self.current is None:
@@ -1342,21 +1826,7 @@ class RadarReader(QMainWindow):
             pill = QPushButton(f"{tag}  ×")
             pill.setToolTip("点击移除标签")
             pill.setCursor(Qt.PointingHandCursor)
-            pill.setStyleSheet(
-                """
-                QPushButton {
-                    background: #eef2f7;
-                    color: #334155;
-                    border: 1px solid #d8dee9;
-                    border-radius: 10px;
-                    padding: 3px 8px;
-                }
-                QPushButton:hover {
-                    background: #e2e8f0;
-                    color: #0f172a;
-                }
-                """
-            )
+            pill.setStyleSheet(TAG_PILL_STYLE)
             pill.clicked.connect(lambda checked=False, t=tag: self.remove_current_tag(t))
             self.tag_pills_layout.addWidget(pill)
         self.tag_pills_layout.addStretch(1)
@@ -1515,6 +1985,26 @@ def _split_tags(value: str) -> list[str]:
     return [tag.strip() for tag in re.split(r"[,，;；\s]+", value) if tag.strip()]
 
 
+def _split_setting_values(value: str, *, lower: bool = False) -> list[str]:
+    seen: set[str] = set()
+    items: list[str] = []
+    for item in re.split(r"[,，;；\s]+", value):
+        cleaned = item.strip()
+        if not cleaned:
+            continue
+        if lower:
+            cleaned = cleaned.lower()
+        if cleaned in seen:
+            continue
+        seen.add(cleaned)
+        items.append(cleaned)
+    return items
+
+
+def _nonempty_lines(value: str) -> list[str]:
+    return [line.strip() for line in value.splitlines() if line.strip()]
+
+
 def _parse_repo_names(value: str) -> list[str]:
     seen: set[str] = set()
     names: list[str] = []
@@ -1542,6 +2032,11 @@ def _parse_repo_names(value: str) -> list[str]:
 def _clean_search_topic(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9_.-]+", "-", value.strip().lower())
     return cleaned.strip("-")
+
+
+def _parse_version(text: str) -> tuple[int, ...]:
+    numbers = re.findall(r"\d+", text or "")
+    return tuple(int(n) for n in numbers) if numbers else (0,)
 
 
 def _auth_source_label() -> str:

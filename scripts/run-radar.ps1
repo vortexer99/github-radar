@@ -25,7 +25,7 @@ $readerExe = $exeCandidates | Where-Object { Test-Path -LiteralPath $_ } | Selec
 
 $defaultConfig = @'
 # GitHub Radar local configuration.
-# GitHub Token can be configured in the reader settings or with GITHUB_TOKEN.
+# GitHub Token can be configured in the reader settings, gh, GH_TOKEN, or GITHUB_TOKEN.
 
 db_path = "data/radar.db"
 report_dir = "reports"
@@ -37,6 +37,7 @@ exploration_ratio = 0.25
 
 languages = []
 excluded_terms = []
+topics = ["ai", "llm", "developer-tools", "security", "database", "cli"]
 
 query_templates = [
   "created:>{created_since} stars:>{min_stars}",

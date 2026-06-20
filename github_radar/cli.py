@@ -160,18 +160,32 @@ def run(args: argparse.Namespace, settings, conn) -> int:
         return 2
 
 
-def run_collection(settings, conn, limit: int = 300):
+def run_collection(settings, conn, limit: int = 300, progress_callback=None):
+    queries = settings.expanded_queries()
+    total_steps = len(queries) + 2
+
+    def emit(step: int, message: str) -> None:
+        if progress_callback is not None:
+            progress_callback(step, total_steps, message)
+
+    def search_progress(done: int, total: int, query: str) -> None:
+        emit(done, f"正在搜索（{done + 1}/{total}）：{query}")
+
     run_id = db.start_run(conn)
     try:
         repos = search_repositories(
-            settings.expanded_queries(),
+            queries,
             per_page=settings.per_page,
             token=settings.github_token,
+            progress_callback=search_progress,
         )
+        emit(len(queries), f"已获取 {len(repos)} 个仓库，正在写入数据库…")
         count = db.upsert_repositories(conn, repos)
+        emit(len(queries) + 1, "正在计算推荐分并生成报告…")
         recent = db.load_recent_repositories(conn, limit=limit)
         scored = score_repositories(conn, recent, settings)
         path = write_markdown_report(scored, settings.report_dir)
+        emit(total_steps, "采集完成")
         db.finish_run(conn, run_id, status="ok", repos_seen=count, report_path=str(path))
         return path
     except GitHubApiError as exc:

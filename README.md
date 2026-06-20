@@ -12,7 +12,7 @@ GitHub Radar is a local-first radar for trending GitHub repositories. It collect
 
 This is a personal project by vortexer99 and evolves mainly around personal usage needs. No long-term maintenance, support, or compatibility guarantee is promised. Feature requests can be filed as issues.
 
-当前版本 / Current version: `1.0.5`
+当前版本 / Current version: `1.1.0`
 
 变更日志 / Changelog: [CHANGELOG.md](CHANGELOG.md)
 
@@ -175,4 +175,5 @@ Main configuration lives in `radar.toml`.
 - `exploration_ratio`：探索推荐比例 / Exploration recommendation ratio
 - `languages`：限定语言 / Language filters
 - `excluded_terms`：降权关键词 / Downranked keywords
+- `topics`：用于生成默认 topic 查询的 GitHub topics / GitHub topics used for default topic queries
 - `query_templates`：GitHub 搜索模板 / GitHub search templates
