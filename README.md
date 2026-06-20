@@ -12,7 +12,7 @@ GitHub Radar is a local-first radar for trending GitHub repositories. It can per
 
 This is a personal project by vortexer99 and evolves mainly around personal usage needs. No long-term maintenance, support, or compatibility guarantee is promised. Feature requests can be filed as issues.
 
-当前版本 / Current version: `1.0.3`
+当前版本 / Current version: `1.0.4`
 
 变更日志 / Changelog: [CHANGELOG.md](CHANGELOG.md)
 
@@ -38,8 +38,8 @@ This is a personal project by vortexer99 and evolves mainly around personal usag
   Batch import repositories manually, one `owner/repo` per line.
 - 用“搜索 Repo”按 topic/关键词搜索 GitHub 仓库并勾选导入
   Use "搜索 Repo" / "Search Repo" to search GitHub by topic/keyword and import selected repositories.
-- 设置页保存 GitHub Token，并显示软件信息
-  Settings page for saving a GitHub Token and viewing app information.
+- 设置页保存 GitHub Token，显示认证优先级，并在采集/导入时提示实际认证来源
+  Settings page for saving a GitHub Token, showing credential priority, and reporting the auth source used for collection/imports.
 - “刷新数据”默认只重新加载本地数据库，也可以勾选后从 GitHub 获取最新数据
   "Refresh data" reloads the local database by default, with an optional GitHub fetch.
 - Windows exe 打包和应用图标
