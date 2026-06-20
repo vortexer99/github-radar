@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import time
 from dataclasses import dataclass
@@ -14,6 +15,9 @@ from .models import Repository
 
 
 API_ROOT = "https://api.github.com"
+MAX_REQUEST_ATTEMPTS = 3
+BASE_RETRY_SECONDS = 2.0
+MAX_RETRY_SECONDS = 20.0
 _LAST_AUTH_SOURCE = "anonymous API"
 
 
@@ -24,9 +28,18 @@ class _CredentialCandidate:
 
 
 class GitHubApiError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after: float | None = None,
+        retriable: bool = False,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.retry_after = retry_after
+        self.retriable = retriable
 
 
 def last_auth_source() -> str:
@@ -94,19 +107,34 @@ def _request_json(path: str, params: dict[str, str], *, candidates: list[_Creden
     for candidate in list(candidates):
         _LAST_AUTH_SOURCE = candidate.source
         try:
-            payload = _request_json_with_token(path, params, token=candidate.token)
+            payload = _request_json_with_retries(path, params, token=candidate.token)
             if candidates and candidates[0] != candidate:
                 candidates.remove(candidate)
                 candidates.insert(0, candidate)
             return payload
         except GitHubApiError as exc:
-            if not _can_retry_without_credential(exc):
+            if not _can_try_next_credential(exc):
                 raise
             last_auth_error = exc
             continue
     if last_auth_error is not None:
         raise last_auth_error
     raise GitHubApiError("No GitHub API credential candidates available.")
+
+
+def _request_json_with_retries(path: str, params: dict[str, str], *, token: str | None) -> dict:
+    last_error: GitHubApiError | None = None
+    for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
+        try:
+            return _request_json_with_token(path, params, token=token)
+        except GitHubApiError as exc:
+            last_error = exc
+            if attempt >= MAX_REQUEST_ATTEMPTS or not exc.retriable:
+                raise
+            time.sleep(_retry_delay(exc, attempt))
+    if last_error is not None:
+        raise last_error
+    raise GitHubApiError("GitHub API request failed before any attempt was made.")
 
 
 def _request_json_with_token(path: str, params: dict[str, str], *, token: str | None) -> dict:
@@ -126,9 +154,16 @@ def _request_json_with_token(path: str, params: dict[str, str], *, token: str | 
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise GitHubApiError(f"GitHub API returned {exc.code}: {body}", status_code=exc.code) from exc
+        raise GitHubApiError(
+            f"GitHub API returned {exc.code}: {body}",
+            status_code=exc.code,
+            retry_after=_parse_retry_after(exc.headers.get("Retry-After")),
+            retriable=_is_retriable_http_error(exc.code, body),
+        ) from exc
     except URLError as exc:
-        raise GitHubApiError(f"GitHub API request failed: {exc}") from exc
+        raise GitHubApiError(f"GitHub API request failed: {exc}", retriable=True) from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise GitHubApiError(f"GitHub API request timed out: {exc}", retriable=True) from exc
 
 
 def _credential_candidates(preferred_token: str | None) -> list[_CredentialCandidate]:
@@ -172,8 +207,42 @@ def _gh_auth_token() -> str | None:
     return completed.stdout.strip() or None
 
 
-def _can_retry_without_credential(error: GitHubApiError) -> bool:
-    return error.status_code in {401, 403}
+def _can_try_next_credential(error: GitHubApiError) -> bool:
+    return error.status_code in {401, 403, 429}
+
+
+def _is_retriable_http_error(status_code: int, body: str) -> bool:
+    if status_code in {429, 500, 502, 503, 504}:
+        return True
+    if status_code != 403:
+        return False
+    lowered = body.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "rate limit",
+            "secondary rate limit",
+            "abuse detection",
+            "try again later",
+            "temporarily",
+        )
+    )
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        return None
+    return max(0.0, seconds)
+
+
+def _retry_delay(error: GitHubApiError, attempt: int) -> float:
+    if error.retry_after is not None:
+        return min(error.retry_after, MAX_RETRY_SECONDS)
+    return min(BASE_RETRY_SECONDS * (2 ** (attempt - 1)), MAX_RETRY_SECONDS)
 
 
 def _repo_from_item(item: dict, query: str) -> Repository:

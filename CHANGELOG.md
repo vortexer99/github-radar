@@ -2,6 +2,16 @@
 
 All notable changes to GitHub Radar are documented here.
 
+## [1.0.5] - 2026-06-21
+
+### Added
+
+- Added retry/backoff for transient GitHub API failures such as network errors, rate limits, and GitHub 5xx responses.
+
+### Changed
+
+- Reworked README around the desktop exe user path, with source-mode and maintenance details separated from the main usage flow.
+
 ## [1.0.4] - 2026-06-20
 
 ### Added
