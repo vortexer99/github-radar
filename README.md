@@ -40,19 +40,12 @@ Open "设置" / "Settings" first if you want to configure a GitHub Token. You ca
 
 A GitHub Token is recommended for higher API rate limits.
 
-认证优先级：
+认证优先级 / Credential priority:
 
-Credential priority:
-
-1. 设置页保存的 GitHub Token
+1. 设置页保存的 GitHub Token / GitHub Token saved in Settings
 2. `gh auth token`
 3. `GH_TOKEN` / `GITHUB_TOKEN`
-4. 匿名 GitHub API
-
-1. GitHub Token saved in Settings
-2. `gh auth token`
-3. `GH_TOKEN` / `GITHUB_TOKEN`
-4. Anonymous GitHub API
+4. 匿名 GitHub API / Anonymous GitHub API
 
 Token 会保存到应用目录的 `.env` 文件，`.env` 已加入 `.gitignore`。不要把真实 Token、`.env`、本机绝对路径或私人数据写入 README、配置示例或提交记录。
 
