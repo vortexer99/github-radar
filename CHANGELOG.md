@@ -2,6 +2,22 @@
 
 All notable changes to GitHub Radar are documented here.
 
+## [1.2.0] - 2026-06-24
+
+### Added
+
+- Added feedback-driven GitHub collection planning that appends interest queries learned from positive feedback.
+- Added a Settings preference preview tab and a switch to enable or disable interest-based GitHub collection queries.
+- Added lightweight text logs under `logs/` for each GitHub collection run, including the planned queries and run outcome.
+- Added a `config_schema_version` field and a legacy query-template notice for older configs that still contain default topic queries.
+
+### Changed
+
+- Replaced preset default topic queries with broad collection queries plus learned interest queries.
+- Clarified the UI and README distinction between GitHub collection and manual Repo search import.
+- Reworked report sections around manual imports, personalized matches, and exploration results.
+- Improved interest query planning with plural-variant merging, noisy keyword filtering, type diversity, and valid GitHub language filters.
+
 ## [1.1.0] - 2026-06-21
 
 ### Added

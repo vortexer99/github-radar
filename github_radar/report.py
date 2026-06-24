@@ -12,7 +12,6 @@ SECTION_TITLES = {
     "manual": "手动导入",
     "personalized": "你可能感兴趣",
     "exploration": "探索推荐",
-    "other": "其他热门项目",
 }
 
 
@@ -52,15 +51,15 @@ def render_markdown(
         "",
     ]
 
-    for section in ["manual", "personalized", "exploration", "other"]:
+    for section in ["manual", "personalized", "exploration"]:
         items = sections.get(section, [])
         if not items:
             continue
         lines.extend([f"## {SECTION_TITLES[section]}", ""])
-        if section == "personalized" and all(item.interest_score == 0 for item in items):
+        if section == "exploration" and all(item.interest_score == 0 for item in items):
             lines.extend(
                 [
-                    "> 目前还在冷启动阶段。这一栏先放综合分高的项目；你反馈几次后会真正个性化。",
+                    "> 目前还在冷启动阶段。这里先放广谱探索结果；你反馈几次后，匹配画像的项目会进入“你可能感兴趣”。",
                     "",
                 ]
             )

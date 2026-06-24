@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+from pathlib import Path
 import sys
 
 from . import db
 from .github_api import GitHubApiError, fetch_repository, last_auth_source, search_repositories
+from .query_planner import plan_collection_queries
 from .report import write_markdown_report
 from .scorer import score_all_repositories, score_repositories
 from .settings import ensure_default_config, load_settings
@@ -84,17 +87,47 @@ def init_config(args: argparse.Namespace) -> int:
 
 
 def collect(args: argparse.Namespace, settings, conn) -> int:
-    queries = settings.expanded_queries()
+    queries = plan_collection_queries(settings, conn)
     if args.dry_run:
         for query in queries:
             print(query)
         return 0
 
-    repos = search_repositories(queries, per_page=settings.per_page, token=settings.github_token)
-    count = db.upsert_repositories(conn, repos)
-    print(f"Collected {count} repositories into {settings.db_path}")
-    print(f"GitHub auth: {last_auth_source()}")
-    return 0
+    log = _start_collection_text_log(settings, mode="collect", queries=queries)
+
+    def search_progress(done: int, total: int, query: str) -> None:
+        if log is not None:
+            log.append(f"search {done + 1}/{total}: {query}")
+
+    try:
+        repos = search_repositories(
+            queries,
+            per_page=settings.per_page,
+            token=settings.github_token,
+            progress_callback=search_progress,
+        )
+        count = db.upsert_repositories(conn, repos)
+        auth = last_auth_source()
+        if log is not None:
+            log.finish("ok", repos_seen=count, auth=auth)
+        print(f"Collected {count} repositories into {_display_path(settings.project_root, settings.db_path)}")
+        print(f"GitHub auth: {auth}")
+        if log is not None:
+            print(f"Collection log: {log.display_path(log.path)}")
+        return 0
+    except GitHubApiError as exc:
+        if log is not None:
+            log.finish("error", repos_seen=0, auth=last_auth_source(), message=str(exc))
+        raise
+    except Exception as exc:
+        if log is not None:
+            log.finish(
+                "error",
+                repos_seen=0,
+                auth=last_auth_source(),
+                message=f"{type(exc).__name__}: {exc}",
+            )
+        raise
 
 
 def report(args: argparse.Namespace, settings, conn) -> int:
@@ -161,14 +194,17 @@ def run(args: argparse.Namespace, settings, conn) -> int:
 
 
 def run_collection(settings, conn, limit: int = 300, progress_callback=None):
-    queries = settings.expanded_queries()
+    queries = plan_collection_queries(settings, conn)
     total_steps = len(queries) + 2
+    log = _start_collection_text_log(settings, mode="run", queries=queries)
 
     def emit(step: int, message: str) -> None:
         if progress_callback is not None:
             progress_callback(step, total_steps, message)
 
     def search_progress(done: int, total: int, query: str) -> None:
+        if log is not None:
+            log.append(f"search {done + 1}/{total}: {query}")
         emit(done, f"正在搜索（{done + 1}/{total}）：{query}")
 
     run_id = db.start_run(conn)
@@ -186,11 +222,90 @@ def run_collection(settings, conn, limit: int = 300, progress_callback=None):
         scored = score_repositories(conn, recent, settings)
         path = write_markdown_report(scored, settings.report_dir)
         emit(total_steps, "采集完成")
+        if log is not None:
+            log.finish("ok", repos_seen=count, report_path=str(path), auth=last_auth_source())
         db.finish_run(conn, run_id, status="ok", repos_seen=count, report_path=str(path))
         return path
     except GitHubApiError as exc:
+        if log is not None:
+            log.finish("error", repos_seen=0, auth=last_auth_source(), message=str(exc))
         db.finish_run(conn, run_id, status="error", repos_seen=0, message=str(exc))
         raise
+    except Exception as exc:
+        if log is not None:
+            log.finish(
+                "error",
+                repos_seen=0,
+                auth=last_auth_source(),
+                message=f"{type(exc).__name__}: {exc}",
+            )
+        db.finish_run(conn, run_id, status="error", repos_seen=0, message=str(exc))
+        raise
+
+
+class CollectionTextLog:
+    def __init__(self, path: Path, root: Path) -> None:
+        self.path = path
+        self.root = root
+
+    def append(self, line: str) -> None:
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{timestamp}] {line}\n")
+
+    def finish(
+        self,
+        status: str,
+        *,
+        repos_seen: int,
+        auth: str,
+        report_path: str = "",
+        message: str = "",
+    ) -> None:
+        self.append(f"status: {status}")
+        self.append(f"repos_seen: {repos_seen}")
+        self.append(f"github_auth: {auth}")
+        if report_path:
+            self.append(f"report_path: {self.display_path(report_path)}")
+        if message:
+            self.append(f"message: {message}")
+
+    def display_path(self, path: str | Path) -> str:
+        return _display_path(self.root, path)
+
+
+def _start_collection_text_log(settings, *, mode: str, queries: list[str]) -> CollectionTextLog | None:
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_path = settings.project_root / "logs" / f"collection-{timestamp}.txt"
+        log = CollectionTextLog(log_path, settings.project_root)
+        log.append("GitHub Radar collection started")
+        log.append(f"mode: {mode}")
+        log.append("config_root: .")
+        log.append(f"db_path: {_display_path(settings.project_root, settings.db_path)}")
+        log.append(f"per_page: {settings.per_page}")
+        log.append(f"min_stars: {settings.min_stars}")
+        log.append(f"created_within_days: {settings.created_within_days}")
+        log.append(f"pushed_within_days: {settings.pushed_within_days}")
+        log.append(f"allow_interest_queries: {settings.allow_interest_queries}")
+        log.append(f"languages: {', '.join(settings.languages) if settings.languages else '(all)'}")
+        log.append(f"query_count: {len(queries)}")
+        log.append("queries:")
+        for index, query in enumerate(queries, start=1):
+            log.append(f"  {index}. {query}")
+        return log
+    except OSError as exc:
+        print(f"Warning: failed to create collection log: {exc}", file=sys.stderr)
+        return None
+
+
+def _display_path(root: Path, path: str | Path) -> str:
+    path = Path(path)
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 data/*.db
 data/*.db-*
 reports/*.md
+logs/
 archive/h5/web/radar.json
 build/
 dist/

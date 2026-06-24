@@ -34,7 +34,7 @@ class ScoredRepository:
     interest_score: float
     star_delta: int
     reasons: list[str]
-    section: str = "other"
+    section: str = "exploration"
 
 
 @dataclass(frozen=True)

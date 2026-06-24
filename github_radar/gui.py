@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import sys
 import webbrowser
 import random
@@ -13,18 +14,20 @@ from . import __version__
 from .cli import run_collection
 from .github_api import GitHubApiError, fetch_latest_release, fetch_repository, last_auth_source, search_repositories
 from .models import Repository, ScoredRepository
+from .profile import build_interest_weights
+from .query_planner import build_personalized_queries
 from .scorer import score_all_repositories
 from .settings import (
+    acknowledge_config_schema_version,
     load_settings,
-    query_templates_from_topics,
+    needs_legacy_topic_template_notice,
     save_collection_settings,
     save_github_token,
-    topics_from_query_templates,
 )
 from .summarizer import summarize_repository
 
 try:
-    from PySide6.QtCore import QPoint, QRect, QSize, QStringListModel, Qt, QThread, QUrl, Signal
+    from PySide6.QtCore import QSize, QStringListModel, Qt, QThread, QUrl, Signal
     from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPen
     from PySide6.QtWidgets import (
         QApplication,
@@ -33,7 +36,6 @@ try:
         QCompleter,
         QDialog,
         QDialogButtonBox,
-        QDoubleSpinBox,
         QFormLayout,
         QHBoxLayout,
         QLabel,
@@ -45,9 +47,7 @@ try:
         QPushButton,
         QInputDialog,
         QPlainTextEdit,
-        QLayout,
         QProgressBar,
-        QSizePolicy,
         QSpinBox,
         QStyledItemDelegate,
         QStyle,
@@ -72,7 +72,6 @@ SECTION_LABELS = {
     "manual": "手动导入",
     "personalized": "你可能感兴趣",
     "exploration": "探索推荐",
-    "other": "其他热门",
 }
 
 FEEDBACK_LABELS = {
@@ -178,178 +177,21 @@ class RepoListDelegate(QStyledItemDelegate):
         return QSize(super().sizeHint(option, index).width(), 70)
 
 
-class FlowLayout(QLayout):
-    def __init__(self, parent: QWidget | None = None, margin: int = 0, spacing: int = 6) -> None:
-        super().__init__(parent)
-        self._items = []
-        self.setContentsMargins(margin, margin, margin, margin)
-        self.setSpacing(spacing)
-
-    def addItem(self, item) -> None:
-        self._items.append(item)
-
-    def count(self) -> int:
-        return len(self._items)
-
-    def itemAt(self, index: int):
-        if 0 <= index < len(self._items):
-            return self._items[index]
-        return None
-
-    def takeAt(self, index: int):
-        if 0 <= index < len(self._items):
-            return self._items.pop(index)
-        return None
-
-    def expandingDirections(self):
-        return Qt.Orientations(Qt.Orientation(0))
-
-    def hasHeightForWidth(self) -> bool:
-        return True
-
-    def heightForWidth(self, width: int) -> int:
-        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
-
-    def setGeometry(self, rect: QRect) -> None:
-        super().setGeometry(rect)
-        self._do_layout(rect, test_only=False)
-
-    def sizeHint(self) -> QSize:
-        return self.minimumSize()
-
-    def minimumSize(self) -> QSize:
-        size = QSize()
-        for item in self._items:
-            size = size.expandedTo(item.minimumSize())
-        margins = self.contentsMargins()
-        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
-        return size
-
-    def _do_layout(self, rect: QRect, *, test_only: bool) -> int:
-        margins = self.contentsMargins()
-        effective_rect = rect.adjusted(margins.left(), margins.top(), -margins.right(), -margins.bottom())
-        x = effective_rect.x()
-        y = effective_rect.y()
-        line_height = 0
-
-        for item in self._items:
-            widget = item.widget()
-            spacing_x = self.spacing()
-            spacing_y = self.spacing()
-            item_size = item.sizeHint()
-            next_x = x + item_size.width() + spacing_x
-            if next_x - spacing_x > effective_rect.right() and line_height > 0:
-                x = effective_rect.x()
-                y = y + line_height + spacing_y
-                next_x = x + item_size.width() + spacing_x
-                line_height = 0
-            if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), item_size))
-            x = next_x
-            line_height = max(line_height, item_size.height())
-
-        return y + line_height - rect.y() + margins.bottom()
-
-
-class TagEditor(QWidget):
-    def __init__(self, *, placeholder: str = "添加标签...") -> None:
-        super().__init__()
-        self._tags: list[str] = []
-        self.on_changed = None
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-
-        self.pills = QWidget()
-        self.pills_layout = FlowLayout(self.pills, spacing=6)
-        self.pills.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        layout.addWidget(self.pills)
-
-        input_row = QHBoxLayout()
-        input_row.setContentsMargins(0, 0, 0, 0)
-        input_row.setSpacing(8)
-        self.input = QLineEdit()
-        self.input.setPlaceholderText(placeholder)
-        self.input.returnPressed.connect(self.add_from_input)
-        input_row.addWidget(self.input, 1)
-
-        self.add_button = QPushButton("+")
-        self.add_button.setObjectName("IconButton")
-        self.add_button.setToolTip("添加")
-        self.add_button.clicked.connect(self.add_from_input)
-        input_row.addWidget(self.add_button)
-        layout.addLayout(input_row)
-
-    def tags(self) -> list[str]:
-        return self._tags.copy()
-
-    def set_tags(self, tags: list[str]) -> None:
-        self._tags = []
-        self.add_tags(tags)
-
-    def add_from_input(self) -> None:
-        tags = _split_setting_values(self.input.text(), lower=True)
-        if not tags:
-            return
-        self.add_tags(tags)
-        self.input.clear()
-
-    def add_tags(self, tags: list[str]) -> None:
-        changed = False
-        for tag in tags:
-            cleaned = tag.strip().lower()
-            if not cleaned or cleaned in self._tags:
-                continue
-            self._tags.append(cleaned)
-            changed = True
-        if changed:
-            self._render()
-            self._notify_changed()
-
-    def remove_tag(self, tag: str) -> None:
-        self._tags = [existing for existing in self._tags if existing != tag]
-        self._render()
-        self._notify_changed()
-
-    def _render(self) -> None:
-        while self.pills_layout.count():
-            item = self.pills_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        for tag in self._tags:
-            pill = QPushButton(f"{tag}  ×")
-            pill.setToolTip("点击移除")
-            pill.setCursor(Qt.PointingHandCursor)
-            pill.setStyleSheet(TAG_PILL_STYLE)
-            pill.clicked.connect(lambda checked=False, t=tag: self.remove_tag(t))
-            self.pills_layout.addWidget(pill)
-
-    def _notify_changed(self) -> None:
-        if self.on_changed is not None:
-            self.on_changed()
-
-
 COLLECTION_HELP_HTML = """
-<h3>采集设置说明</h3>
-<p>这些选项决定每次“从 GitHub 获取最新数据”时，去 GitHub 搜索哪些仓库、拉取多少。</p>
+<h3>GitHub 采集设置说明</h3>
+<p>这些选项只影响“从 GitHub 获取最新数据”这条 GitHub 采集流程，不影响工具栏里的手动搜索导入。</p>
 
 <h4>基本选项</h4>
 <ul>
 <li><b>最低 stars</b>：只采集 star 数不低于这个值的仓库。调高更聚焦头部项目，调低能发现更早期的项目。</li>
-<li><b>每个查询拉取数量</b>：每条查询最多取回多少个仓库（1–100）。数值越大覆盖越广，但单次采集更慢、更耗 API 额度。</li>
+<li><b>GitHub 采集：每条查询拉取数量</b>：每条采集查询最多取回多少个仓库（1–100）。单轮候选量约等于“查询条数 × 这个数量”，重复仓库会去重。数值越大覆盖越广，但单次采集更慢、更耗 API 额度。</li>
 <li><b>创建于最近 N 天</b>：用于“最近新建”的查询，只看最近这么多天内创建的仓库。例如 45 表示关注近 45 天的新项目。</li>
 <li><b>更新于最近 N 天</b>：用于“最近活跃”的查询，只看最近这么多天内有过推送（更新）的仓库。例如 14 表示关注近两周仍在更新的项目。</li>
-<li><b>探索推荐比例</b>：报告里“探索推荐”一栏所占的比例（0–1）。比例越高，越多还没和你的偏好挂钩的新项目会被推到前面。</li>
 <li><b>限定语言</b>：只保留这些主力语言的仓库，用逗号分隔，例如 <code>Python, Rust, TypeScript</code>。留空表示不限语言。</li>
 <li><b>降权关键词</b>：命中这些词（出现在名称、简介、语言或 topics 中）的仓库会被压低排名，用逗号分隔，例如 <code>crypto, blockchain</code>。是降权，不是直接过滤掉。</li>
 </ul>
 
-<h4>Topic 列表</h4>
-<p>这里填 GitHub 的 topic（主题标签），例如 <code>ai</code>、<code>rust</code>、<code>developer-tools</code>。每个 topic 都会自动生成一条对应的查询模板。</p>
-
-<h4>查询模板（高级）</h4>
+<h4>GitHub 采集查询模板（高级）</h4>
 <p>每行一条 GitHub 搜索语句，会直接发给 GitHub 搜索 API。模板里可以使用三个占位符，采集时自动替换：</p>
 <ul>
 <li><code>{min_stars}</code> → 上面“最低 stars”的值</li>
@@ -364,8 +206,71 @@ COLLECTION_HELP_HTML = """
 <li><code>topic:rust</code>：带有 rust 这个 topic</li>
 <li><code>language:python</code>：主语言是 Python</li>
 </ul>
-<p>提示：改动 Topic 列表会自动重写模板；但只要你手动编辑过模板，保存时就以你写的模板为准（点“按 Topic 生成”可重新按 Topic 覆盖）。</p>
+<p>提示：这里是基础/手工模板；个性化方向会在采集时自动追加。</p>
+
+<h4>GitHub 采集：由喜好生成的查询模板</h4>
+<p>这块是只读预览，来自“喜好”页的正向画像。采集时程序会把这些查询追加到上面的基础/手工模板后面，不需要复制粘贴。</p>
 """
+
+
+def _top_weight_terms(
+    weights: dict[str, float],
+    *,
+    positive: bool,
+    limit: int = 12,
+) -> list[tuple[str, float]]:
+    if positive:
+        filtered = [
+            (term, weight)
+            for term, weight in weights.items()
+            if weight > 0.1 and _is_user_facing_preference_term(term)
+        ]
+        return sorted(filtered, key=lambda item: item[1], reverse=True)[:limit]
+    filtered = [
+        (term, weight)
+        for term, weight in weights.items()
+        if weight < -0.1 and _is_user_facing_preference_term(term)
+    ]
+    return sorted(filtered, key=lambda item: item[1])[:limit]
+
+
+def _render_weight_list(items: list[tuple[str, float]], *, empty: str) -> str:
+    if not items:
+        return f"<p>{escape(empty)}</p>"
+    rows = []
+    for term, weight in items:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(_human_preference_term(term))}</td>"
+            f"<td>{weight:+.2f}</td>"
+            "</tr>"
+        )
+    return f"<table cellspacing=\"0\" cellpadding=\"4\">{''.join(rows)}</table>"
+
+
+def _render_query_list(queries: list[str], *, empty: str) -> str:
+    if not queries:
+        return f"<p>{escape(empty)}</p>"
+    entries = "".join(f"<li><code>{escape(query)}</code></li>" for query in queries)
+    return f"<ul>{entries}</ul>"
+
+
+def _human_preference_term(term: str) -> str:
+    prefix, _, value = term.partition(":")
+    if not value:
+        return term
+    labels = {
+        "language": "语言",
+        "topic": "主题",
+        "keyword": "关键词",
+        "tag": "标记",
+    }
+    label = labels.get(prefix, prefix)
+    return f"{label}: {value}"
+
+
+def _is_user_facing_preference_term(term: str) -> bool:
+    return term.startswith(("language:", "topic:", "keyword:"))
 
 
 class SettingsDialog(QDialog):
@@ -374,8 +279,6 @@ class SettingsDialog(QDialog):
         self.reader = reader
         self.setWindowTitle("设置")
         self.resize(760, 680)
-        self._syncing_templates = False
-        self._templates_user_edited = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -383,6 +286,7 @@ class SettingsDialog(QDialog):
 
         tabs = QTabWidget()
         tabs.addTab(self._collection_tab(), "采集")
+        tabs.addTab(self._preference_tab(), "喜好")
         tabs.addTab(self._about_tab(), "关于")
         layout.addWidget(tabs, 1)
 
@@ -395,18 +299,18 @@ class SettingsDialog(QDialog):
         return self.token_input.text().strip()
 
     def collection_settings(self) -> dict:
-        topics = self.topics_editor.tags()
         query_templates = _nonempty_lines(self.query_templates_input.toPlainText())
         return {
             "min_stars": self.min_stars_input.value(),
             "per_page": self.per_page_input.value(),
             "created_within_days": self.created_days_input.value(),
             "pushed_within_days": self.pushed_days_input.value(),
-            "exploration_ratio": self.exploration_ratio_input.value(),
+            "exploration_ratio": self.reader.settings.exploration_ratio,
+            "allow_interest_queries": self.allow_interest_queries_input.isChecked(),
             "languages": _split_setting_values(self.languages_input.text()),
             "excluded_terms": _split_setting_values(self.excluded_terms_input.text(), lower=True),
-            "topics": topics,
-            "query_templates": query_templates or query_templates_from_topics(topics),
+            "topics": [],
+            "query_templates": query_templates,
         }
 
     def _collection_tab(self) -> QWidget:
@@ -432,7 +336,7 @@ class SettingsDialog(QDialog):
         self.per_page_input = QSpinBox()
         self.per_page_input.setRange(1, 100)
         self.per_page_input.setValue(self.reader.settings.per_page)
-        form.addRow("每个查询拉取数量", self.per_page_input)
+        form.addRow("GitHub 采集每条查询拉取数量", self.per_page_input)
 
         self.created_days_input = QSpinBox()
         self.created_days_input.setRange(1, 3650)
@@ -445,13 +349,6 @@ class SettingsDialog(QDialog):
         self.pushed_days_input.setSuffix(" 天")
         self.pushed_days_input.setValue(self.reader.settings.pushed_within_days)
         form.addRow("更新于最近（{pushed_since}）", self.pushed_days_input)
-
-        self.exploration_ratio_input = QDoubleSpinBox()
-        self.exploration_ratio_input.setRange(0.0, 1.0)
-        self.exploration_ratio_input.setSingleStep(0.05)
-        self.exploration_ratio_input.setDecimals(2)
-        self.exploration_ratio_input.setValue(self.reader.settings.exploration_ratio)
-        form.addRow("探索推荐比例", self.exploration_ratio_input)
 
         self.languages_input = QLineEdit(", ".join(self.reader.settings.languages))
         self.languages_input.setPlaceholderText("Python, Rust, TypeScript")
@@ -472,32 +369,38 @@ class SettingsDialog(QDialog):
         auth_hint.setObjectName("MutedText")
         layout.addWidget(auth_hint)
 
-        topic_label = QLabel("Topic 列表")
-        topic_label.setObjectName("MutedText")
-        layout.addWidget(topic_label)
-        topics = self.reader.settings.topics or topics_from_query_templates(self.reader.settings.query_templates)
-        self.topics_editor = TagEditor(placeholder="添加 topic，例如 ai、rust、developer-tools")
-        self.topics_editor.set_tags(topics)
-        self.topics_editor.on_changed = self._topics_changed
-        layout.addWidget(self.topics_editor)
-
-        template_row = QHBoxLayout()
-        template_label = QLabel("查询模板（高级，每行一个）")
+        template_label = QLabel("GitHub 采集查询模板（高级，每行一个）")
         template_label.setObjectName("MutedText")
-        template_row.addWidget(template_label, 1)
-        regenerate_button = QPushButton("按 Topic 生成")
-        regenerate_button.clicked.connect(self._regenerate_query_templates)
-        template_row.addWidget(regenerate_button)
-        layout.addLayout(template_row)
+        layout.addWidget(template_label)
 
         self.query_templates_input = QPlainTextEdit()
         self.query_templates_input.setPlainText("\n".join(self.reader.settings.query_templates))
-        self.query_templates_input.textChanged.connect(self._query_templates_changed)
         layout.addWidget(self.query_templates_input, 1)
 
+        preference_header = QHBoxLayout()
+        preference_template_label = QLabel("GitHub 采集：由喜好生成的查询模板（只读）")
+        preference_template_label.setObjectName("MutedText")
+        preference_header.addWidget(preference_template_label)
+        preference_header.addStretch(1)
+        self.allow_interest_queries_input = QCheckBox("允许基于兴趣的查询")
+        self.allow_interest_queries_input.setChecked(self.reader.settings.allow_interest_queries)
+        self.allow_interest_queries_input.stateChanged.connect(self._refresh_preference_query_templates)
+        preference_header.addWidget(self.allow_interest_queries_input)
+        self.interest_queries_disabled_label = QLabel("（已禁用）")
+        self.interest_queries_disabled_label.setObjectName("MutedText")
+        preference_header.addWidget(self.interest_queries_disabled_label)
+        layout.addLayout(preference_header)
+
+        self.preference_query_templates = QPlainTextEdit()
+        self.preference_query_templates.setReadOnly(True)
+        self.preference_query_templates.setMaximumHeight(96)
+        layout.addWidget(self.preference_query_templates)
+        self.min_stars_input.valueChanged.connect(self._refresh_preference_query_templates)
+        self.pushed_days_input.valueChanged.connect(self._refresh_preference_query_templates)
+        self._refresh_preference_query_templates()
+
         hint = QLabel(
-            "Topic 会生成 topic:<name> pushed:>{pushed_since} stars:>{min_stars} 查询。"
-            "如果手动修改高级模板，保存时会以高级模板为准。"
+            "这些设置只影响 GitHub 采集。工具栏里的“手动搜索 Repo”是单次人工搜索，最多展示 30 个结果，勾选后才导入。"
         )
         hint.setWordWrap(True)
         hint.setObjectName("MutedText")
@@ -512,28 +415,22 @@ class SettingsDialog(QDialog):
         layout.addLayout(help_row)
         return tab
 
-    def _topics_changed(self) -> None:
-        if self._templates_user_edited:
-            return
-        self._set_query_templates_from_topics()
-
-    def _query_templates_changed(self) -> None:
-        if not self._syncing_templates:
-            self._templates_user_edited = True
-
-    def _regenerate_query_templates(self) -> None:
-        self._templates_user_edited = False
-        self._set_query_templates_from_topics()
-
-    def _set_query_templates_from_topics(self) -> None:
-        topics = self.topics_editor.tags()
-        self._syncing_templates = True
-        self.query_templates_input.setPlainText("\n".join(query_templates_from_topics(topics)))
-        self._syncing_templates = False
+    def _refresh_preference_query_templates(self, *_args) -> None:
+        preview_settings = replace(
+            self.reader.settings,
+            min_stars=self.min_stars_input.value(),
+            pushed_within_days=self.pushed_days_input.value(),
+            allow_interest_queries=self.allow_interest_queries_input.isChecked(),
+        )
+        queries = build_personalized_queries(preview_settings, self.reader.conn)
+        enabled = self.allow_interest_queries_input.isChecked()
+        text = "\n".join(queries) if queries else "还没有足够喜好反馈生成查询模板。"
+        self.interest_queries_disabled_label.setVisible(not enabled)
+        self.preference_query_templates.setPlainText(text)
 
     def _show_collection_help(self) -> None:
         dialog = QDialog(self)
-        dialog.setWindowTitle("采集设置说明")
+        dialog.setWindowTitle("GitHub 采集设置说明")
         dialog.resize(600, 520)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -548,6 +445,68 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         dialog.exec()
+
+    def _preference_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setHtml(self._preference_html())
+        layout.addWidget(browser, 1)
+        return tab
+
+    def _preference_html(self) -> str:
+        stats = db.repository_stats(self.reader.conn)
+        weights = build_interest_weights(self.reader.conn)
+        positive_terms = _top_weight_terms(weights, positive=True)
+        negative_terms = _top_weight_terms(weights, positive=False)
+        feedback_counts = stats.get("feedback_counts", {})
+
+        feedback_rows = []
+        for key, label in FEEDBACK_LABELS.items():
+            count = int(feedback_counts.get(key, 0)) if isinstance(feedback_counts, dict) else 0
+            feedback_rows.append(f"<tr><td>{escape(label)}</td><td>{count}</td></tr>")
+        has_feedback_counts = (
+            isinstance(feedback_counts, dict)
+            and any(int(feedback_counts.get(key, 0)) for key in FEEDBACK_LABELS)
+        )
+        if not has_feedback_counts:
+            feedback_rows.append('<tr><td colspan="2">还没有喜好标记。先在项目详情里点“喜欢”“收藏”或“不感兴趣”。</td></tr>')
+
+        positive_html = _render_weight_list(positive_terms, empty="还没有明显的正向兴趣词。")
+        negative_html = _render_weight_list(negative_terms, empty="还没有明显的负向兴趣词。")
+        next_queries = build_personalized_queries(self.reader.settings, self.reader.conn)
+        if self.reader.settings.allow_interest_queries:
+            next_queries_html = _render_query_list(
+                next_queries,
+                empty="还没有足够反馈生成个性化查询。",
+            )
+        else:
+            next_queries_html = "<p>已禁用基于兴趣的查询。</p>"
+
+        return f"""
+        <h3>喜好反馈情况</h3>
+        <p>这里展示当前数据库中记录的标记，以及系统从这些标记里学到的兴趣画像。正向兴趣会参与下一轮采集搜索，负向兴趣会降低相关项目排序。</p>
+
+        <h4>反馈标记</h4>
+        <table cellspacing="0" cellpadding="4">
+          <tr><td><b>已标记仓库</b></td><td>{int(stats["marked_repositories"])}</td></tr>
+          {''.join(feedback_rows)}
+        </table>
+
+        <h4>当前偏好画像</h4>
+        <p><b>更感兴趣</b></p>
+        {positive_html}
+        <p><b>更少推荐</b></p>
+        {negative_html}
+
+        <h4>下一轮兴趣查询</h4>
+        <p>这里展示下次 GitHub 采集实际会追加的兴趣查询，和“采集”页只读预览保持一致。</p>
+        {next_queries_html}
+        """
 
     def _about_tab(self) -> QWidget:
         tab = QWidget()
@@ -760,7 +719,7 @@ class TopicImportDialog(QDialog):
         super().__init__(reader)
         self.reader = reader
         self.results: list[Repository] = []
-        self.setWindowTitle("搜索 Repo 导入")
+        self.setWindowTitle("手动搜索 Repo 导入")
         self.resize(760, 560)
 
         layout = QVBoxLayout(self)
@@ -769,7 +728,7 @@ class TopicImportDialog(QDialog):
 
         search_row = QHBoxLayout()
         self.query_input = QLineEdit()
-        self.query_input.setPlaceholderText("输入 topic 或关键词搜索 Repo，例如 ai、agent、developer-tools")
+        self.query_input.setPlaceholderText("手动输入 topic 或关键词搜索 Repo，例如 ai、agent、developer-tools")
         self.query_input.returnPressed.connect(self.search)
         search_row.addWidget(self.query_input, 1)
 
@@ -778,7 +737,10 @@ class TopicImportDialog(QDialog):
         search_row.addWidget(self.search_button)
         layout.addLayout(search_row)
 
-        hint = QLabel("会优先按 GitHub topic 搜索 Repo；如果没有结果，再按关键词搜索。勾选结果后点击“导入选中”。")
+        hint = QLabel(
+            "这是手动搜索导入，不使用 GitHub 采集设置；最多展示 30 个结果，勾选后点击“导入选中”。"
+            "会优先按 GitHub topic 搜索，如果没有结果，再按关键词搜索。"
+        )
         hint.setObjectName("MutedText")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -790,7 +752,7 @@ class TopicImportDialog(QDialog):
         layout.addWidget(self.result_list, 1)
 
         button_row = QHBoxLayout()
-        self.status_label = QLabel("输入 topic 或关键词后开始搜索 Repo")
+        self.status_label = QLabel("手动输入 topic 或关键词后开始搜索 Repo")
         self.status_label.setObjectName("MutedText")
         button_row.addWidget(self.status_label, 1)
 
@@ -939,11 +901,28 @@ class RadarReader(QMainWindow):
         self._build_ui()
         self._apply_style()
         self.reload_data()
+        self._maybe_show_legacy_topic_template_notice()
 
     def _set_window_icon(self) -> None:
         icon_path = self.settings.project_root / "assets" / "app-icon.ico"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
+
+    def _maybe_show_legacy_topic_template_notice(self) -> None:
+        if not needs_legacy_topic_template_notice(self.settings):
+            return
+        QMessageBox.information(
+            self,
+            "旧版查询模板提醒",
+            "检测到当前 radar.toml 来自旧版本，查询模板里仍包含 topic 行。\n\n"
+            "新版默认不再预设 ai、llm 等兴趣方向；这些 topic 查询会继续参与采集，"
+            "可能和新的“喜好生成查询模板”重复。\n\n"
+            "如果你不想保留这些手工 topic 查询，请到“设置 > 采集 > 查询模板”中删除对应的 "
+            "topic:<name> 行；保留也可以，程序会尊重你的手工配置。\n\n"
+            "点“OK”后不再提示。",
+        )
+        acknowledge_config_schema_version(self.settings)
+        self.settings = load_settings(self.settings.project_root / "radar.toml")
 
     def _build_ui(self) -> None:
         toolbar = QToolBar("工具")
@@ -961,7 +940,7 @@ class RadarReader(QMainWindow):
         import_action.triggered.connect(self.import_repository)
         toolbar.addAction(import_action)
 
-        topic_import_action = QAction("搜索 Repo", self)
+        topic_import_action = QAction("手动搜索 Repo", self)
         topic_import_action.triggered.connect(self.import_by_topic)
         toolbar.addAction(topic_import_action)
 

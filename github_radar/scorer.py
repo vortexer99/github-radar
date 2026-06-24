@@ -18,7 +18,7 @@ def score_repositories(
     weights = build_interest_weights(conn)
     scored = [_score_one(conn, repo, settings, weights) for repo in repos]
     scored.sort(key=lambda item: item.total_score, reverse=True)
-    return assign_sections(scored, exploration_ratio=settings.exploration_ratio)
+    return assign_sections(scored)
 
 
 def score_all_repositories(
@@ -31,7 +31,7 @@ def score_all_repositories(
     scored.sort(key=lambda item: item.total_score, reverse=True)
     section_by_name = {
         item.repo.full_name: item.section
-        for item in assign_sections(scored, exploration_ratio=settings.exploration_ratio)
+        for item in assign_sections(scored)
     }
     return [
         ScoredRepository(
@@ -43,20 +43,13 @@ def score_all_repositories(
             interest_score=item.interest_score,
             star_delta=item.star_delta,
             reasons=item.reasons,
-            section=section_by_name.get(item.repo.full_name, "other"),
+            section=section_by_name.get(item.repo.full_name, "exploration"),
         )
         for item in scored
     ]
 
 
-def assign_sections(
-    scored: list[ScoredRepository],
-    *,
-    personalized_count: int = 10,
-    exploration_count: int = 10,
-    other_count: int = 20,
-    exploration_ratio: float = 0.25,
-) -> list[ScoredRepository]:
+def assign_sections(scored: list[ScoredRepository]) -> list[ScoredRepository]:
     if not scored:
         return []
 
@@ -66,42 +59,22 @@ def assign_sections(
 
     positive_interest = [item for item in scored if item.interest_score > 0.05]
     positive_interest = [item for item in positive_interest if item.repo.full_name not in used]
-    personalized = positive_interest[:personalized_count]
+    personalized = positive_interest
     used.update(item.repo.full_name for item in personalized)
 
     remaining = [item for item in scored if item.repo.full_name not in used]
-    explore_target = max(exploration_count, int(len(scored) * exploration_ratio))
-    explore_target = min(explore_target, exploration_count)
     exploration = sorted(
         remaining,
         key=lambda item: (item.recency_score + item.growth_score, item.heat_score),
         reverse=True,
-    )[:explore_target]
+    )
     used.update(item.repo.full_name for item in exploration)
-
-    other = [item for item in scored if item.repo.full_name not in used][:other_count]
 
     result: list[ScoredRepository] = []
     result.extend(_with_section(manual, "manual"))
     result.extend(_with_section(personalized, "personalized"))
     result.extend(_with_section(exploration, "exploration"))
-    result.extend(_with_section(other, "other"))
 
-    if not personalized:
-        warmup_candidates = [item for item in scored if item.repo.full_name not in manual_names]
-        warmup = sorted(
-            warmup_candidates,
-            key=lambda item: (
-                _newness(item.repo.created_at),
-                item.recency_score + item.growth_score,
-                item.heat_score,
-            ),
-            reverse=True,
-        )[: min(8, len(scored))]
-        warmup_names = {item.repo.full_name for item in warmup}
-        result = _with_section(warmup, "personalized") + [
-            item for item in result if item.repo.full_name not in warmup_names
-        ]
     return result
 
 

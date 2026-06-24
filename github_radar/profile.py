@@ -59,7 +59,8 @@ def build_interest_weights(conn: sqlite3.Connection) -> dict[str, float]:
         if not term.startswith(("language:", "topic:", "keyword:", "tag:")):
             weights[f"keyword:{term}"] += weight
 
-    return {term: float(weight) for term, weight in weights.items() if abs(weight) >= 0.1}
+    merged = _merge_plural_variants(weights)
+    return {term: float(weight) for term, weight in merged.items() if abs(weight) >= 0.1}
 
 
 def score_interest(repo: Repository, weights: dict[str, float]) -> tuple[float, list[str]]:
@@ -95,6 +96,27 @@ def extract_terms(repo: Repository) -> set[str]:
         if word not in STOP_WORDS:
             terms.add(f"keyword:{word}")
     return terms
+
+
+def _merge_plural_variants(weights: Counter[str]) -> Counter[str]:
+    merged: Counter[str] = Counter()
+    terms = set(weights)
+    for term, weight in weights.items():
+        canonical = _singular_variant(term)
+        if canonical and canonical in terms:
+            merged[canonical] += weight
+        else:
+            merged[term] += weight
+    return merged
+
+
+def _singular_variant(term: str) -> str:
+    prefix, separator, value = term.partition(":")
+    if separator != ":" or prefix not in {"topic", "keyword"}:
+        return ""
+    if len(value) <= 3 or not value.endswith("s") or value.endswith("ss"):
+        return ""
+    return f"{prefix}:{value[:-1]}"
 
 
 def _human_reason(term: str, weight: float) -> str:

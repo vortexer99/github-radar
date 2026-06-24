@@ -4,15 +4,15 @@
   <img src="assets/app-icon.png" alt="GitHub Radar icon" width="128" height="128">
 </p>
 
-GitHub Radar 是一个本地优先的 GitHub 热门项目雷达。它会采集热门仓库，按热度、增长、新鲜度和你的反馈排序，并提供桌面阅读器来筛选、标记、加标签和导入项目。
+GitHub Radar 是一个本地优先的 GitHub 热门项目雷达。它会采集广谱 GitHub 信号，从你的反馈中学习下一轮搜索方向，再按热度、增长、新鲜度和兴趣排序，并提供桌面阅读器来筛选、标记、加标签和导入项目。
 
-GitHub Radar is a local-first radar for trending GitHub repositories. It collects popular repos, ranks them by heat, growth, freshness, and your feedback, and provides a desktop reader for filtering, marking, tagging, and importing projects.
+GitHub Radar is a local-first radar for trending GitHub repositories. It collects broad GitHub signals, learns from your feedback to plan future searches, ranks repos by heat, growth, freshness, and interest, and provides a desktop reader for filtering, marking, tagging, and importing projects.
 
 这是 vortexer99 的个人项目，主要按个人使用需求演进。不承诺长期维护、功能支持或兼容性保证。有功能需求可以发 issue。
 
 This is a personal project by vortexer99 and evolves mainly around personal usage needs. No long-term maintenance, support, or compatibility guarantee is promised. Feature requests can be filed as issues.
 
-当前版本 / Current version: `1.1.0`
+当前版本 / Current version: `1.2.0`
 
 变更日志 / Changelog: [CHANGELOG.md](CHANGELOG.md)
 
@@ -75,12 +75,14 @@ Main workflow:
    Browse repositories in the middle column; feedback-marked repos use different background colors.
 3. 右栏阅读详情、打开 GitHub、记录反馈、管理自定义标签。
    Read details, open GitHub, record feedback, and manage custom tags in the right column.
-4. 点“刷新数据”默认只重新加载本地数据库；勾选“从 GitHub 获取最新数据后再刷新”才会采集远端数据。
-   Click "刷新数据" / "Refresh data" to reload local data by default; select "从 GitHub 获取最新数据后再刷新" to fetch from GitHub first.
+4. 点“刷新数据”默认只重新加载本地数据库；勾选“从 GitHub 获取最新数据后再刷新”才会运行 GitHub 采集。GitHub 采集按设置里的查询模板逐条搜索，每条最多拉取 `per_page` 个仓库，重复仓库会去重。
+   Click "刷新数据" / "Refresh data" to reload local data by default; select "从 GitHub 获取最新数据后再刷新" to run GitHub collection. GitHub collection searches each configured query, fetches up to `per_page` repositories per query, and deduplicates repeated repos.
+   每次 GitHub 采集都会在 `logs/` 下写入一份轻量文本日志，记录本轮查询列表和结果摘要。
+   Each GitHub collection run writes a lightweight text log under `logs/` with the planned queries and outcome summary.
 5. 用“导入仓库”批量导入指定仓库。
    Use "导入仓库" / "Import repositories" to batch import specific repos.
-6. 用“搜索 Repo”按 topic 或关键词搜索并勾选导入。
-   Use "搜索 Repo" / "Search Repo" to search by topic or keyword and import selected repos.
+6. 用“手动搜索 Repo”按 topic 或关键词搜索并勾选导入；这是人工导入入口，单次最多展示 30 个搜索结果，不使用 GitHub 采集设置。
+   Use "手动搜索 Repo" / "Manual Search Repo" to search by topic or keyword and import selected repos; this manual import flow shows up to 30 results per search and does not use GitHub collection settings.
 7. 用“设置”配置 GitHub Token、查看认证优先级和软件信息。
    Use "设置" / "Settings" to configure the GitHub Token, view credential priority, and see app information.
 
@@ -168,12 +170,13 @@ Main configuration lives in `radar.toml`.
 
 - `db_path`：SQLite 数据库路径 / SQLite database path
 - `report_dir`：报告输出目录 / Report output directory
+- `config_schema_version`：配置格式版本，用于旧版迁移提示 / Configuration schema version used for migration notices
 - `min_stars`：采集查询的最低 stars / Minimum stars for collection queries
 - `per_page`：每个 GitHub 查询拉取数量 / Number of results per GitHub query
 - `created_within_days`：新建仓库查询窗口 / Creation-date query window
 - `pushed_within_days`：近期更新仓库查询窗口 / Recent-push query window
-- `exploration_ratio`：探索推荐比例 / Exploration recommendation ratio
+- `allow_interest_queries`：是否追加由正反馈生成的兴趣查询 / Whether to append interest queries learned from positive feedback
 - `languages`：限定语言 / Language filters
 - `excluded_terms`：降权关键词 / Downranked keywords
-- `topics`：用于生成默认 topic 查询的 GitHub topics / GitHub topics used for default topic queries
-- `query_templates`：GitHub 搜索模板 / GitHub search templates
+- `topics`：手工配置的 GitHub topics；默认留空，不预设兴趣方向 / Manually configured GitHub topics; empty by default so no interest direction is preselected
+- `query_templates`：基础探索用 GitHub 搜索模板；采集时还会自动追加由正反馈推导出的 topic、language、keyword 查询 / Base exploration GitHub search templates; collection also appends topic, language, and keyword queries learned from positive feedback

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 try:
@@ -15,48 +16,31 @@ except ModuleNotFoundError:  # pragma: no cover
 DEFAULT_QUERY_TEMPLATES = [
     "created:>{created_since} stars:>{min_stars}",
     "pushed:>{pushed_since} stars:>{min_stars}",
-    "topic:ai pushed:>{pushed_since} stars:>{min_stars}",
-    "topic:llm pushed:>{pushed_since} stars:>{min_stars}",
-    "topic:developer-tools pushed:>{pushed_since} stars:>{min_stars}",
-    "topic:security pushed:>{pushed_since} stars:>{min_stars}",
-    "topic:database pushed:>{pushed_since} stars:>{min_stars}",
-    "topic:cli pushed:>{pushed_since} stars:>{min_stars}",
 ]
-
-DEFAULT_TOPICS = [
-    "ai",
-    "llm",
-    "developer-tools",
-    "security",
-    "database",
-    "cli",
-]
+DEFAULT_TOPICS: list[str] = []
+CONFIG_SCHEMA_VERSION = 2
+SIMPLE_LANGUAGE_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 DEFAULT_CONFIG_TEXT = """# GitHub Radar local configuration.
 # GitHub Token can be configured in the reader settings, gh, GH_TOKEN, or GITHUB_TOKEN.
 
+config_schema_version = 2
 db_path = "data/radar.db"
 report_dir = "reports"
 min_stars = 100
 per_page = 50
 created_within_days = 45
 pushed_within_days = 14
-exploration_ratio = 0.25
+allow_interest_queries = true
 
 languages = []
 excluded_terms = []
-topics = ["ai", "llm", "developer-tools", "security", "database", "cli"]
+topics = []
 
 query_templates = [
   "created:>{created_since} stars:>{min_stars}",
-  "pushed:>{pushed_since} stars:>{min_stars}",
-  "topic:ai pushed:>{pushed_since} stars:>{min_stars}",
-  "topic:llm pushed:>{pushed_since} stars:>{min_stars}",
-  "topic:developer-tools pushed:>{pushed_since} stars:>{min_stars}",
-  "topic:security pushed:>{pushed_since} stars:>{min_stars}",
-  "topic:database pushed:>{pushed_since} stars:>{min_stars}",
-  "topic:cli pushed:>{pushed_since} stars:>{min_stars}"
+  "pushed:>{pushed_since} stars:>{min_stars}"
 ]
 """
 
@@ -71,11 +55,13 @@ class Settings:
     created_within_days: int = 45
     pushed_within_days: int = 14
     exploration_ratio: float = 0.25
+    allow_interest_queries: bool = True
     languages: list[str] = field(default_factory=list)
     excluded_terms: list[str] = field(default_factory=list)
     topics: list[str] = field(default_factory=lambda: DEFAULT_TOPICS.copy())
     query_templates: list[str] = field(default_factory=lambda: DEFAULT_QUERY_TEMPLATES.copy())
     github_token: str = ""
+    config_schema_version: int = 0
 
     def expanded_queries(self, now: datetime | None = None) -> list[str]:
         now = now or datetime.now(timezone.utc)
@@ -89,8 +75,11 @@ class Settings:
                 min_stars=self.min_stars,
             )
             if self.languages:
-                lang_terms = " ".join(f"language:{language}" for language in self.languages)
-                query = f"{query} {lang_terms}"
+                lang_terms = " ".join(
+                    term for language in self.languages if (term := format_language_filter(language))
+                )
+                if lang_terms:
+                    query = f"{query} {lang_terms}"
             queries.append(query)
         return queries
 
@@ -132,11 +121,13 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         created_within_days=int(data.get("created_within_days", 45)),
         pushed_within_days=int(data.get("pushed_within_days", 14)),
         exploration_ratio=float(data.get("exploration_ratio", 0.25)),
+        allow_interest_queries=bool(data.get("allow_interest_queries", True)),
         languages=[str(item) for item in data.get("languages", [])],
         excluded_terms=[str(item).lower() for item in data.get("excluded_terms", [])],
         topics=topics,
         query_templates=query_templates,
         github_token=project_env.get("GITHUB_TOKEN", ""),
+        config_schema_version=int(data.get("config_schema_version", 0)),
     )
 
 
@@ -214,6 +205,7 @@ def save_collection_settings(
     created_within_days: int,
     pushed_within_days: int,
     exploration_ratio: float,
+    allow_interest_queries: bool,
     languages: list[str],
     excluded_terms: list[str],
     topics: list[str],
@@ -224,13 +216,14 @@ def save_collection_settings(
         "# GitHub Radar local configuration.",
         "# GitHub Token can be configured in the reader settings, gh, GH_TOKEN, or GITHUB_TOKEN.",
         "",
+        f"config_schema_version = {CONFIG_SCHEMA_VERSION}",
         f'db_path = "{_toml_escape(_relative_or_absolute(settings.project_root, settings.db_path))}"',
         f'report_dir = "{_toml_escape(_relative_or_absolute(settings.project_root, settings.report_dir))}"',
         f"min_stars = {max(0, int(min_stars))}",
         f"per_page = {max(1, min(100, int(per_page)))}",
         f"created_within_days = {max(1, int(created_within_days))}",
         f"pushed_within_days = {max(1, int(pushed_within_days))}",
-        f"exploration_ratio = {float(exploration_ratio):.3g}",
+        f"allow_interest_queries = {_toml_bool(allow_interest_queries)}",
         "",
         f"languages = {_toml_string_list(languages)}",
         f"excluded_terms = {_toml_string_list(excluded_terms)}",
@@ -241,6 +234,32 @@ def save_collection_settings(
     lines.extend(f'  "{_toml_escape(template)}",' for template in query_templates)
     lines.extend(["]", ""])
     config_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def needs_legacy_topic_template_notice(settings: Settings) -> bool:
+    return (
+        settings.config_schema_version < CONFIG_SCHEMA_VERSION
+        and any(template.strip().startswith("topic:") for template in settings.query_templates)
+    )
+
+
+def acknowledge_config_schema_version(settings: Settings) -> None:
+    config_path = settings.project_root / "radar.toml"
+    ensure_default_config(config_path)
+    lines = config_path.read_text(encoding="utf-8").splitlines()
+    marker = f"config_schema_version = {CONFIG_SCHEMA_VERSION}"
+    for index, line in enumerate(lines):
+        if line.strip().startswith("config_schema_version"):
+            lines[index] = marker
+            break
+    else:
+        insert_at = 0
+        while insert_at < len(lines) and lines[insert_at].strip().startswith("#"):
+            insert_at += 1
+        while insert_at < len(lines) and not lines[insert_at].strip():
+            insert_at += 1
+        lines.insert(insert_at, marker)
+    config_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def topics_from_query_templates(query_templates: list[str]) -> list[str]:
@@ -264,6 +283,16 @@ def query_templates_from_topics(topics: list[str]) -> list[str]:
     return templates
 
 
+def format_language_filter(language: str) -> str:
+    value = " ".join(str(language).strip().split())
+    if not value:
+        return ""
+    if SIMPLE_LANGUAGE_PATTERN.fullmatch(value):
+        return f"language:{value}"
+    escaped = value.replace("\\", "\\\\").replace('"', r"\"")
+    return f'language:"{escaped}"'
+
+
 def _decode_env_value(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         value = value[1:-1]
@@ -281,6 +310,10 @@ def _toml_escape(value: str) -> str:
 def _toml_string_list(values: list[str]) -> str:
     cleaned = [value.strip() for value in values if value.strip()]
     return "[" + ", ".join(f'"{_toml_escape(value)}"' for value in cleaned) + "]"
+
+
+def _toml_bool(value: bool) -> str:
+    return "true" if value else "false"
 
 
 def _relative_or_absolute(root: Path, path: Path) -> str:
