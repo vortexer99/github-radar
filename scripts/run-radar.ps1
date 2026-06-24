@@ -27,27 +27,25 @@ $defaultConfig = @'
 # GitHub Radar local configuration.
 # GitHub Token can be configured in the reader settings, gh, GH_TOKEN, or GITHUB_TOKEN.
 
+config_schema_version = 2
 db_path = "data/radar.db"
 report_dir = "reports"
 min_stars = 100
 per_page = 50
 created_within_days = 45
 pushed_within_days = 14
-exploration_ratio = 0.25
+allow_interest_queries = true
 
 languages = []
 excluded_terms = []
-topics = ["ai", "llm", "developer-tools", "security", "database", "cli"]
+topics = []
 
 query_templates = [
   "created:>{created_since} stars:>{min_stars}",
   "pushed:>{pushed_since} stars:>{min_stars}",
-  "topic:ai pushed:>{pushed_since} stars:>{min_stars}",
-  "topic:llm pushed:>{pushed_since} stars:>{min_stars}",
-  "topic:developer-tools pushed:>{pushed_since} stars:>{min_stars}",
-  "topic:security pushed:>{pushed_since} stars:>{min_stars}",
-  "topic:database pushed:>{pushed_since} stars:>{min_stars}",
-  "topic:cli pushed:>{pushed_since} stars:>{min_stars}"
+  "forks:>50 pushed:>{pushed_since} stars:>{min_stars}",
+  "created:>{created_since} forks:>20 stars:>{min_stars}",
+  "archived:false pushed:>{pushed_since} stars:>{min_stars}"
 ]
 '@
 

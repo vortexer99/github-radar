@@ -17,4 +17,7 @@ topics = []
 query_templates = [
   "created:>{created_since} stars:>{min_stars}",
   "pushed:>{pushed_since} stars:>{min_stars}",
+  "forks:>50 pushed:>{pushed_since} stars:>{min_stars}",
+  "created:>{created_since} forks:>20 stars:>{min_stars}",
+  "archived:false pushed:>{pushed_since} stars:>{min_stars}",
 ]

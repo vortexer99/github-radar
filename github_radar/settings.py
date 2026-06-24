@@ -16,6 +16,9 @@ except ModuleNotFoundError:  # pragma: no cover
 DEFAULT_QUERY_TEMPLATES = [
     "created:>{created_since} stars:>{min_stars}",
     "pushed:>{pushed_since} stars:>{min_stars}",
+    "forks:>50 pushed:>{pushed_since} stars:>{min_stars}",
+    "created:>{created_since} forks:>20 stars:>{min_stars}",
+    "archived:false pushed:>{pushed_since} stars:>{min_stars}",
 ]
 DEFAULT_TOPICS: list[str] = []
 CONFIG_SCHEMA_VERSION = 2
@@ -40,7 +43,10 @@ topics = []
 
 query_templates = [
   "created:>{created_since} stars:>{min_stars}",
-  "pushed:>{pushed_since} stars:>{min_stars}"
+  "pushed:>{pushed_since} stars:>{min_stars}",
+  "forks:>50 pushed:>{pushed_since} stars:>{min_stars}",
+  "created:>{created_since} forks:>20 stars:>{min_stars}",
+  "archived:false pushed:>{pushed_since} stars:>{min_stars}"
 ]
 """
 
@@ -278,6 +284,9 @@ def query_templates_from_topics(topics: list[str]) -> list[str]:
     templates = [
         "created:>{created_since} stars:>{min_stars}",
         "pushed:>{pushed_since} stars:>{min_stars}",
+        "forks:>50 pushed:>{pushed_since} stars:>{min_stars}",
+        "created:>{created_since} forks:>20 stars:>{min_stars}",
+        "archived:false pushed:>{pushed_since} stars:>{min_stars}",
     ]
     templates.extend(f"topic:{topic} pushed:>{{pushed_since}} stars:>{{min_stars}}" for topic in topics)
     return templates

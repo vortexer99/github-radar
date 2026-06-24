@@ -14,7 +14,10 @@ All notable changes to GitHub Radar are documented here.
 ### Changed
 
 - Replaced preset default topic queries with broad collection queries plus learned interest queries.
+- Expanded the default broad exploration queries from 2 to 5 so collection keeps more non-personalized coverage.
 - Clarified the UI and README distinction between GitHub collection and manual Repo search import.
+- Updated the Windows scheduled-run docs to call `GitHubRadarReader.exe --run` directly and removed `run-radar.ps1` from the release package.
+- Changed the CI artifact upload to publish the unpacked Windows package directory while keeping a zip asset for GitHub Releases.
 - Reworked report sections around manual imports, personalized matches, and exploration results.
 - Improved interest query planning with plural-variant merging, noisy keyword filtering, type diversity, and valid GitHub language filters.
 

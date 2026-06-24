@@ -75,8 +75,8 @@ Main workflow:
    Browse repositories in the middle column; feedback-marked repos use different background colors.
 3. 右栏阅读详情、打开 GitHub、记录反馈、管理自定义标签。
    Read details, open GitHub, record feedback, and manage custom tags in the right column.
-4. 点“刷新数据”默认只重新加载本地数据库；勾选“从 GitHub 获取最新数据后再刷新”才会运行 GitHub 采集。GitHub 采集按设置里的查询模板逐条搜索，每条最多拉取 `per_page` 个仓库，重复仓库会去重。
-   Click "刷新数据" / "Refresh data" to reload local data by default; select "从 GitHub 获取最新数据后再刷新" to run GitHub collection. GitHub collection searches each configured query, fetches up to `per_page` repositories per query, and deduplicates repeated repos.
+4. 点“刷新数据”默认只重新加载本地数据库；勾选“从 GitHub 获取最新数据后再刷新”才会运行 GitHub 采集。GitHub 采集按设置里的查询模板逐条搜索，默认包含 5 条广谱探索查询，每条最多拉取 `per_page` 个仓库，重复仓库会去重。
+   Click "刷新数据" / "Refresh data" to reload local data by default; select "从 GitHub 获取最新数据后再刷新" to run GitHub collection. GitHub collection searches each configured query, includes 5 broad exploration queries by default, fetches up to `per_page` repositories per query, and deduplicates repeated repos.
    每次 GitHub 采集都会在 `logs/` 下写入一份轻量文本日志，记录本轮查询列表和结果摘要。
    Each GitHub collection run writes a lightweight text log under `logs/` with the planned queries and outcome summary.
 5. 用“导入仓库”批量导入指定仓库。
@@ -96,14 +96,13 @@ The tag bar supports typing new tags and completing from existing tags. Batch im
 
 ## 自动运行 / Scheduled Runs
 
-如果下载的应用文件夹里包含 `run-radar.ps1`，可以用 Windows 计划任务定时抓取。请先把文件解压到固定目录，例如：
+下载的 Windows 版本可以直接用 `GitHubRadarReader.exe --run` 做定时抓取。请先把文件解压到固定目录，例如：
 
-If the downloaded app folder includes `run-radar.ps1`, you can use Windows Task Scheduler for scheduled collection. First extract the files to a stable directory, for example:
+The downloaded Windows build can use `GitHubRadarReader.exe --run` directly for scheduled collection. First extract the files to a stable directory, for example:
 
 ```text
 C:\Tools\GitHubRadar\
   GitHubRadarReader.exe
-  run-radar.ps1
   README.md
 ```
 
@@ -112,12 +111,12 @@ C:\Tools\GitHubRadar\
 Run this one-liner in PowerShell to create a scheduled task that collects data every Monday and Thursday at 06:00:
 
 ```powershell
-schtasks /Create /TN "GitHub Radar" /SC WEEKLY /D MON,THU /ST 06:00 /TR 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Tools\GitHubRadar\run-radar.ps1" -AssumeYes' /F
+schtasks /Create /TN "GitHub Radar" /SC WEEKLY /D MON,THU /ST 06:00 /TR '"C:\Tools\GitHubRadar\GitHubRadarReader.exe" --run --config "C:\Tools\GitHubRadar\radar.toml" --log "C:\Tools\GitHubRadar\run-radar.log"' /F
 ```
 
-`run-radar.ps1` 会优先调用同目录里的 `GitHubRadarReader.exe --run --config radar.toml --log run-radar.log`；找不到 exe 时才回退到源码模式。抓取日志会写入 `run-radar.log`。如果 GitHub API 返回错误，脚本会显示日志最后几行。
+首次运行会自动创建 `radar.toml`。抓取日志会写入 `run-radar.log`，每轮 GitHub 采集的查询摘要会写入 `logs\`。
 
-`run-radar.ps1` prefers `GitHubRadarReader.exe --run --config radar.toml --log run-radar.log` from the same directory and falls back to source mode only when no exe is found. Collection logs are written to `run-radar.log`; when GitHub API errors occur, the script prints the last log lines.
+The first run creates `radar.toml` automatically. Run output is written to `run-radar.log`, and each GitHub collection run writes its query summary under `logs\`.
 
 如果不是 Windows，或者不想使用 Windows 计划任务，请用系统自带的定时器，例如 cron、systemd timer 或其他任务调度工具。
 

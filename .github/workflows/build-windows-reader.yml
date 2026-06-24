@@ -52,7 +52,6 @@ jobs:
           $packageRoot = Join-Path $PWD "release\github-radar-windows"
           New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
           Copy-Item -LiteralPath "dist\GitHubRadarReader.exe" -Destination (Join-Path $packageRoot "GitHubRadarReader.exe") -Force
-          Copy-Item -LiteralPath "scripts\run-radar.ps1" -Destination (Join-Path $packageRoot "run-radar.ps1") -Force
           Copy-Item -LiteralPath "README.md" -Destination (Join-Path $packageRoot "README.md") -Force
           Compress-Archive -Path (Join-Path $packageRoot "*") -DestinationPath "release\github-radar-windows.zip" -Force
 
@@ -60,7 +59,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: github-radar-windows
-          path: release/github-radar-windows.zip
+          path: release/github-radar-windows/
           if-no-files-found: error
 
       - name: Publish GitHub release
