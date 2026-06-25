@@ -12,7 +12,7 @@ GitHub Radar is a local-first radar for trending GitHub repositories. It collect
 
 This is a personal project by vortexer99 and evolves mainly around personal usage needs. No long-term maintenance, support, or compatibility guarantee is promised. Feature requests can be filed as issues.
 
-当前版本 / Current version: `1.2.0`
+当前版本 / Current version: `1.3.0`
 
 变更日志 / Changelog: [CHANGELOG.md](CHANGELOG.md)
 
@@ -71,6 +71,8 @@ Main workflow:
 
 1. 左栏筛选：搜索、分区、语言、反馈状态、标签、排序。
    Use the left column for search, section, language, feedback status, tag, and sorting filters.
+   搜索框支持布尔语法：空格表示“且”（AND），`or` 或 `|` 表示“或”（OR），`-` 或 `not` 表示排除（NOT），`"..."` 表示精确短语，可混用（如 `ai or ml agent -crypto`）；不区分大小写，下方实时显示匹配数量。
+   The search box supports boolean syntax: space means AND, `or` or `|` means OR, `-` or `not` excludes (NOT), and `"..."` matches an exact phrase; these combine (e.g. `ai or ml agent -crypto`), are case-insensitive, and the match count is shown live below the box.
 2. 中栏浏览仓库列表；已反馈项目会显示不同底色。
    Browse repositories in the middle column; feedback-marked repos use different background colors.
 3. 右栏阅读详情、打开 GitHub、记录反馈、管理自定义标签。
@@ -174,6 +176,7 @@ Main configuration lives in `radar.toml`.
 - `per_page`：每个 GitHub 查询拉取数量 / Number of results per GitHub query
 - `created_within_days`：新建仓库查询窗口 / Creation-date query window
 - `pushed_within_days`：近期更新仓库查询窗口 / Recent-push query window
+- `reader_limit`：阅读器一次加载的仓库数量；`0` = 全部加载（默认），正数则限制加载最近 N 个 / Number of repos the reader loads at once; `0` = load all (default), positive number limits to the most recent N
 - `allow_interest_queries`：是否追加由正反馈生成的兴趣查询 / Whether to append interest queries learned from positive feedback
 - `languages`：限定语言 / Language filters
 - `excluded_terms`：降权关键词 / Downranked keywords

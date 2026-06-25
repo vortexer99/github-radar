@@ -35,6 +35,7 @@ min_stars = 100
 per_page = 50
 created_within_days = 45
 pushed_within_days = 14
+reader_limit = 0  # 阅读器一次加载的仓库数量；0 = 全部加载
 allow_interest_queries = true
 
 languages = []
@@ -60,6 +61,7 @@ class Settings:
     per_page: int = 50
     created_within_days: int = 45
     pushed_within_days: int = 14
+    reader_limit: int = 0
     exploration_ratio: float = 0.25
     allow_interest_queries: bool = True
     languages: list[str] = field(default_factory=list)
@@ -126,6 +128,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         per_page=int(data.get("per_page", 50)),
         created_within_days=int(data.get("created_within_days", 45)),
         pushed_within_days=int(data.get("pushed_within_days", 14)),
+        reader_limit=int(data.get("reader_limit", 0)),
         exploration_ratio=float(data.get("exploration_ratio", 0.25)),
         allow_interest_queries=bool(data.get("allow_interest_queries", True)),
         languages=[str(item) for item in data.get("languages", [])],
@@ -229,6 +232,7 @@ def save_collection_settings(
         f"per_page = {max(1, min(100, int(per_page)))}",
         f"created_within_days = {max(1, int(created_within_days))}",
         f"pushed_within_days = {max(1, int(pushed_within_days))}",
+        f"reader_limit = {max(0, int(settings.reader_limit))}",
         f"allow_interest_queries = {_toml_bool(allow_interest_queries)}",
         "",
         f"languages = {_toml_string_list(languages)}",

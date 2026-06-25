@@ -150,16 +150,17 @@ def upsert_repositories(conn: sqlite3.Connection, repos: Iterable[Repository]) -
     return len(rows)
 
 
-def load_recent_repositories(conn: sqlite3.Connection, *, limit: int = 500) -> list[Repository]:
-    rows = conn.execute(
-        """
+def load_recent_repositories(conn: sqlite3.Connection, *, limit: int | None = None) -> list[Repository]:
+    sql = """
         SELECT *
         FROM repositories
         ORDER BY last_seen_at DESC, stars DESC
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
+    """
+    params: tuple[int, ...] = ()
+    if limit and limit > 0:
+        sql += "        LIMIT ?\n"
+        params = (limit,)
+    rows = conn.execute(sql, params).fetchall()
     return [_repo_from_row(row) for row in rows]
 
 

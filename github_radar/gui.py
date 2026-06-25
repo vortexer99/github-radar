@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 import sys
 import webbrowser
@@ -27,7 +28,7 @@ from .settings import (
 from .summarizer import summarize_repository
 
 try:
-    from PySide6.QtCore import QSize, QStringListModel, Qt, QThread, QUrl, Signal
+    from PySide6.QtCore import QSize, QStringListModel, Qt, QThread, QTimer, QUrl, Signal
     from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPen
     from PySide6.QtWidgets import (
         QApplication,
@@ -979,9 +980,25 @@ class RadarReader(QMainWindow):
         filter_title.setObjectName("PanelTitle")
         left_layout.addWidget(filter_title)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("搜索名称、简介、语言...")
-        self.search.textChanged.connect(lambda *_args: self.apply_filters())
+        self.search.setPlaceholderText("搜索（空格=且 · or=或 · -=排除）")
+        self.search.setToolTip(
+            "支持布尔搜索（不区分大小写）：\n"
+            "  空格 = 且（AND）       例：ai agent\n"
+            "  or 或 |  = 或（OR）     例：ai or ml\n"
+            "  - 或 not = 非（NOT）    例：-crypto / not crypto\n"
+            '  "短语"  = 精确匹配       例："local first"\n'
+            "可混用：ai or ml agent -crypto\n"
+            "（先按 or 分组，组内空格表示同时包含）"
+        )
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.setInterval(180)
+        self._search_debounce.timeout.connect(self.apply_filters)
+        self.search.textChanged.connect(lambda *_args: self._search_debounce.start())
         left_layout.addWidget(self.search)
+        self.result_count_label = QLabel("")
+        self.result_count_label.setObjectName("MutedText")
+        left_layout.addWidget(self.result_count_label)
 
         self.section_filter = QComboBox()
         for key, label in SECTION_LABELS.items():
@@ -1335,7 +1352,7 @@ class RadarReader(QMainWindow):
         )
 
     def reload_data(self) -> None:
-        repos = db.load_recent_repositories(self.conn, limit=500)
+        repos = db.load_recent_repositories(self.conn, limit=self.settings.reader_limit)
         self.scored = score_all_repositories(self.conn, repos, self.settings)
         self.feedback_by_repo = self._load_latest_feedback()
         self.tags_by_repo = db.load_repository_tags(self.conn)
@@ -1497,7 +1514,7 @@ class RadarReader(QMainWindow):
         selected_name = preferred_name
         if selected_name is None:
             selected_name = self.current.repo.full_name if self.current else ""
-        query = self.search.text().strip().lower()
+        matcher = _build_query_matcher(self.search.text())
         section = self.section_filter.currentData()
         language = self.language_filter.currentData() if self.language_filter.count() else "all"
         feedback = self.feedback_filter.currentData()
@@ -1523,13 +1540,19 @@ class RadarReader(QMainWindow):
                 continue
             if tag_filter not in ("all", "__untagged__") and tag_filter not in repo_tags:
                 continue
-            haystack = " ".join(
-                [repo.full_name, repo.description, repo.language, " ".join(repo.topics), " ".join(repo_tags)]
-            ).lower()
-            if query and query not in haystack:
-                continue
+            if matcher is not None:
+                haystack = " ".join(
+                    [repo.full_name, repo.description, repo.language, " ".join(repo.topics), " ".join(repo_tags)]
+                ).lower()
+                if not matcher(haystack):
+                    continue
             self.filtered.append(item)
         self._sort_filtered(sort_key)
+        total = len(self.scored)
+        shown = len(self.filtered)
+        self.result_count_label.setText(
+            f"共 {total} 个" if shown == total else f"匹配 {shown} / {total} 个"
+        )
 
         self.repo_list.blockSignals(True)
         self.repo_list.clear()
@@ -2011,6 +2034,62 @@ def _parse_repo_names(value: str) -> list[str]:
 def _clean_search_topic(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9_.-]+", "-", value.strip().lower())
     return cleaned.strip("-")
+
+
+def _tokenize_query(query: str) -> list[str]:
+    """Split a search query into tokens, keeping "quoted phrases" intact."""
+    return re.findall(r'"[^"]*"|\S+', query)
+
+
+def _build_query_matcher(query: str) -> Callable[[str], bool] | None:
+    """Compile a search-box query into a predicate over a lowercased haystack.
+
+    Grammar (case-insensitive), evaluated as disjunctive normal form:
+      - tokens are split into OR-groups on ``or`` / ``|``
+      - within a group, whitespace-separated terms are AND-ed
+      - a term is negated by a leading ``-`` or a preceding ``not``
+      - ``and`` / ``&`` are no-op connectors (space already means AND)
+      - ``"..."`` is a literal phrase (also how to search the words
+        and/or/not literally)
+
+    Returns ``predicate(haystack) -> bool``, or ``None`` when the query is empty
+    or has no usable terms (callers then skip query filtering entirely).
+    """
+    groups: list[list[tuple[bool, str]]] = [[]]
+    negate_next = False
+    for token in _tokenize_query(query.lower()):
+        if token in ("or", "|"):
+            groups.append([])
+            negate_next = False
+            continue
+        if token in ("and", "&"):
+            continue
+        if token == "not":
+            negate_next = True
+            continue
+        negated = negate_next
+        negate_next = False
+        if token.startswith("-") and len(token) > 1:
+            negated = True
+            token = token[1:]
+        if len(token) >= 2 and token.startswith('"') and token.endswith('"'):
+            token = token[1:-1]
+        token = token.strip()
+        if not token or token == "-":
+            continue
+        groups[-1].append((negated, token))
+
+    groups = [group for group in groups if group]
+    if not groups:
+        return None
+
+    def predicate(haystack: str) -> bool:
+        return any(
+            all((term in haystack) != negated for negated, term in group)
+            for group in groups
+        )
+
+    return predicate
 
 
 def _parse_version(text: str) -> tuple[int, ...]:

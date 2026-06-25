@@ -2,6 +2,19 @@
 
 All notable changes to GitHub Radar are documented here.
 
+## [1.3.0] - 2026-06-25
+
+### Added
+
+- Added boolean search to the reader's filter box: space = AND, `or` / `|` = OR, `-` / `not` = NOT, and `"..."` matches an exact phrase; these combine (e.g. `ai or ml agent -crypto`) and are case-insensitive.
+- Added a live result-count label under the search box showing how many repositories match the current filters.
+- Added a `reader_limit` config key in `radar.toml` (`0` = load all, the new default; a positive number caps loading to the most recent N repositories).
+
+### Changed
+
+- The reader now loads all stored repositories by default instead of only the most recent 500, so older repos remain visible and searchable.
+- Debounced the search box (180ms) so filtering runs once after typing stops, keeping the UI responsive as the database grows.
+
 ## [1.2.0] - 2026-06-24
 
 ### Added
