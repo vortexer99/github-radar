@@ -13,7 +13,14 @@ import re
 from . import db
 from . import __version__
 from .cli import run_collection
-from .github_api import GitHubApiError, fetch_latest_release, fetch_repository, last_auth_source, search_repositories
+from .github_api import (
+    GitHubApiError,
+    fetch_latest_release,
+    fetch_repository,
+    fetch_starred_repositories,
+    last_auth_source,
+    search_repositories,
+)
 from .models import Repository, ScoredRepository
 from .profile import build_interest_weights
 from .query_planner import build_personalized_queries
@@ -44,6 +51,7 @@ try:
         QListWidget,
         QListWidgetItem,
         QMainWindow,
+        QMenu,
         QMessageBox,
         QPushButton,
         QInputDialog,
@@ -57,6 +65,7 @@ try:
         QTabWidget,
         QTextBrowser,
         QToolBar,
+        QToolButton,
         QVBoxLayout,
         QWidget,
     )
@@ -180,7 +189,7 @@ class RepoListDelegate(QStyledItemDelegate):
 
 COLLECTION_HELP_HTML = """
 <h3>GitHub 采集设置说明</h3>
-<p>这些选项只影响“从 GitHub 获取最新数据”这条 GitHub 采集流程，不影响工具栏里的手动搜索导入。</p>
+<p>这些选项只影响“导入 > 按模板自动抓取”这条 GitHub 采集流程，不影响其他导入入口。</p>
 
 <h4>基本选项</h4>
 <ul>
@@ -401,7 +410,7 @@ class SettingsDialog(QDialog):
         self._refresh_preference_query_templates()
 
         hint = QLabel(
-            "这些设置只影响 GitHub 采集。工具栏里的“手动搜索 Repo”是单次人工搜索，最多展示 30 个结果，勾选后才导入。"
+            "这些设置只影响“导入 > 按模板自动抓取”。“导入 > 搜索导入”是单次人工搜索，最多展示 30 个结果，勾选后才导入。"
         )
         hint.setWordWrap(True)
         hint.setObjectName("MutedText")
@@ -596,45 +605,10 @@ class SettingsDialog(QDialog):
             QMessageBox.information(self, "检查更新", f"已是最新版本（{__version__}）。")
 
 
-class RefreshDataDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("刷新数据")
-        self.resize(440, 190)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
-
-        title = QLabel("刷新仓库数据")
-        title.setObjectName("PanelTitle")
-        layout.addWidget(title)
-
-        hint = QLabel("默认仅从本地数据库重新加载，速度更快且不会访问 GitHub。")
-        hint.setObjectName("MutedText")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        self.fetch_from_github = QCheckBox("从 GitHub 获取最新数据后再刷新")
-        self.fetch_from_github.setChecked(False)
-        self.fetch_from_github.setToolTip("选中后会运行采集任务并更新本地数据库")
-        layout.addWidget(self.fetch_from_github)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("刷新")
-        buttons.button(QDialogButtonBox.Cancel).setText("取消")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def should_fetch_from_github(self) -> bool:
-        return self.fetch_from_github.isChecked()
-
-
 class BatchImportDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("批量导入仓库")
+        self.setWindowTitle("按名称/地址导入")
         self.resize(560, 420)
 
         layout = QVBoxLayout(self)
@@ -675,11 +649,12 @@ class BatchImportDialog(QDialog):
 
 
 class SearchResultWidget(QWidget):
-    def __init__(self, repo: Repository) -> None:
+    def __init__(self, repo: Repository, *, checked: bool = False) -> None:
         super().__init__()
         self.setObjectName("SearchResultRow")
         self.checkbox = QCheckBox()
         self.checkbox.setObjectName("SearchResultCheck")
+        self.checkbox.setChecked(checked)
 
         title = QLabel(repo.full_name)
         title.setObjectName("SearchResultTitle")
@@ -720,7 +695,7 @@ class TopicImportDialog(QDialog):
         super().__init__(reader)
         self.reader = reader
         self.results: list[Repository] = []
-        self.setWindowTitle("手动搜索 Repo 导入")
+        self.setWindowTitle("搜索导入")
         self.resize(760, 560)
 
         layout = QVBoxLayout(self)
@@ -843,6 +818,92 @@ class TopicImportDialog(QDialog):
                 widget.checkbox.setChecked(checked)
 
 
+class StarredImportDialog(QDialog):
+    def __init__(self, repos: list[Repository], auth_label: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.results = repos
+        self.setWindowTitle("导入我的 Stars")
+        self.resize(820, 620)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        hint = QLabel(
+            f"已从当前 GitHub 账号读取 {len(repos)} 个 starred 仓库（认证：{auth_label}）。"
+            "默认全选；取消不想导入的项目后点击“导入选中”。"
+        )
+        hint.setObjectName("MutedText")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.result_list = QListWidget()
+        self.result_list.setObjectName("SearchResultList")
+        self.result_list.setSpacing(4)
+        self.result_list.itemClicked.connect(self._toggle_result_item)
+        layout.addWidget(self.result_list, 1)
+
+        for repo in self.results:
+            item = QListWidgetItem()
+            item.setToolTip(repo.description or repo.full_name)
+            self.result_list.addItem(item)
+            widget = SearchResultWidget(repo, checked=True)
+            widget.checkbox.toggled.connect(self._refresh_status)
+            item.setSizeHint(widget.sizeHint())
+            self.result_list.setItemWidget(item, widget)
+
+        button_row = QHBoxLayout()
+        self.status_label = QLabel(f"已选择 {len(repos)} / {len(repos)} 个仓库")
+        self.status_label.setObjectName("MutedText")
+        button_row.addWidget(self.status_label, 1)
+
+        select_all_button = QPushButton("全选")
+        select_all_button.clicked.connect(lambda: self._set_all_checked(True))
+        button_row.addWidget(select_all_button)
+
+        clear_all_button = QPushButton("全不选")
+        clear_all_button.clicked.connect(lambda: self._set_all_checked(False))
+        button_row.addWidget(clear_all_button)
+
+        import_button = QPushButton("导入选中")
+        import_button.setObjectName("PrimaryButton")
+        import_button.clicked.connect(self.accept)
+        button_row.addWidget(import_button)
+
+        cancel_button = QPushButton("取消")
+        cancel_button.clicked.connect(self.reject)
+        button_row.addWidget(cancel_button)
+        layout.addLayout(button_row)
+
+    def selected_repositories(self) -> list[Repository]:
+        selected: list[Repository] = []
+        for index, repo in enumerate(self.results):
+            item = self.result_list.item(index)
+            widget = self.result_list.itemWidget(item) if item else None
+            if isinstance(widget, SearchResultWidget) and widget.is_checked():
+                selected.append(repo)
+        return selected
+
+    def _toggle_result_item(self, item: QListWidgetItem) -> None:
+        widget = self.result_list.itemWidget(item)
+        if isinstance(widget, SearchResultWidget):
+            widget.toggle_checked()
+            self._refresh_status()
+
+    def _set_all_checked(self, checked: bool) -> None:
+        for index in range(self.result_list.count()):
+            item = self.result_list.item(index)
+            widget = self.result_list.itemWidget(item)
+            if isinstance(widget, SearchResultWidget):
+                widget.checkbox.setChecked(checked)
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        selected = len(self.selected_repositories())
+        total = len(self.results)
+        self.status_label.setText(f"已选择 {selected} / {total} 个仓库")
+
+
 class CollectWorker(QThread):
     progress = Signal(int, int, str)
     finished_ok = Signal(str, str)
@@ -878,6 +939,28 @@ class CollectWorker(QThread):
                 conn.close()
 
 
+class StarredImportWorker(QThread):
+    progress = Signal(str)
+    finished_ok = Signal(object, str)
+    failed = Signal(str)
+
+    def __init__(self, settings) -> None:
+        super().__init__()
+        self.settings = settings
+
+    def run(self) -> None:  # noqa: D401 - QThread entry point
+        try:
+            repos = fetch_starred_repositories(
+                token=self.settings.github_token,
+                progress_callback=lambda _page, message: self.progress.emit(message),
+            )
+            self.finished_ok.emit(repos, _auth_source_label())
+        except GitHubApiError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # pragma: no cover - defensive
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
 class RadarReader(QMainWindow):
     def __init__(self, config_path: str | Path = "radar.toml") -> None:
         super().__init__()
@@ -909,6 +992,9 @@ class RadarReader(QMainWindow):
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
 
+    def createPopupMenu(self) -> QMenu | None:  # noqa: N802 - Qt override
+        return None
+
     def _maybe_show_legacy_topic_template_notice(self) -> None:
         if not needs_legacy_topic_template_notice(self.settings):
             return
@@ -929,21 +1015,54 @@ class RadarReader(QMainWindow):
         toolbar = QToolBar("工具")
         toolbar.setObjectName("MainToolBar")
         toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        toolbar.setAllowedAreas(Qt.TopToolBarArea)
+        toolbar.setContextMenuPolicy(Qt.PreventContextMenu)
         toolbar.setIconSize(QSize(16, 16))
         self.addToolBar(toolbar)
+        toolbar.toggleViewAction().setEnabled(False)
+        toolbar.show()
+        self.main_toolbar = toolbar
 
-        refresh_action = QAction("刷新数据", self)
+        refresh_action = QAction("刷新本地", self)
+        refresh_action.setStatusTip("只从本地数据库重新加载，不访问 GitHub")
         refresh_action.triggered.connect(self.prompt_refresh_data)
         toolbar.addAction(refresh_action)
         self.refresh_action = refresh_action
 
-        import_action = QAction("导入仓库", self)
-        import_action.triggered.connect(self.import_repository)
-        toolbar.addAction(import_action)
+        import_menu = QMenu("导入", self)
+        import_menu.setObjectName("ImportMenu")
 
-        topic_import_action = QAction("手动搜索 Repo", self)
+        template_collect_action = QAction("按模板自动抓取", self)
+        template_collect_action.setStatusTip("按设置中的查询模板从 GitHub 抓取仓库")
+        template_collect_action.triggered.connect(self.confirm_template_collection)
+        import_menu.addAction(template_collect_action)
+        import_menu.addSeparator()
+        self.template_collect_action = template_collect_action
+
+        import_action = QAction("按名称/地址导入", self)
+        import_action.setStatusTip("输入 owner/repo 或 GitHub 仓库地址批量导入")
+        import_action.triggered.connect(self.import_repository)
+        import_menu.addAction(import_action)
+
+        topic_import_action = QAction("搜索导入", self)
+        topic_import_action.setStatusTip("按 topic 或关键词搜索后勾选导入")
         topic_import_action.triggered.connect(self.import_by_topic)
-        toolbar.addAction(topic_import_action)
+        import_menu.addAction(topic_import_action)
+
+        import_stars_action = QAction("从我的 Stars 导入", self)
+        import_stars_action.setStatusTip("读取当前 GitHub 账号的 starred 仓库并选择导入")
+        import_stars_action.triggered.connect(self.import_my_stars)
+        import_menu.addAction(import_stars_action)
+        self.import_stars_action = import_stars_action
+
+        import_button = QToolButton(self)
+        import_button.setObjectName("ImportMenuButton")
+        import_button.setText("导入 ▾")
+        import_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        import_button.setPopupMode(QToolButton.InstantPopup)
+        import_button.setMenu(import_menu)
+        toolbar.addWidget(import_button)
 
         random_action = QAction("随便看看", self)
         random_action.setShortcut("Ctrl+R")
@@ -964,6 +1083,7 @@ class RadarReader(QMainWindow):
         self.status.addPermanentWidget(self.progress_bar)
         self.setStatusBar(self.status)
         self._collect_worker: CollectWorker | None = None
+        self._starred_worker: StarredImportWorker | None = None
 
         root = QSplitter(Qt.Horizontal)
         root.setChildrenCollapsible(False)
@@ -1166,6 +1286,50 @@ class RadarReader(QMainWindow):
                 border-color: #c8daf7;
                 color: #1557a6;
             }
+            QToolButton#ImportMenuButton {
+                background: #f8fafc;
+                border: 1px solid #cfd8e6;
+                border-radius: 7px;
+                color: #1f2937;
+                min-height: 28px;
+                padding: 5px 12px;
+                font-weight: 600;
+            }
+            QToolButton#ImportMenuButton:hover {
+                background: #f3f8ff;
+                border-color: #9fc3f2;
+                color: #1557a6;
+            }
+            QToolButton#ImportMenuButton:pressed,
+            QToolButton#ImportMenuButton:open {
+                background: #eaf2ff;
+                border-color: #8db9f0;
+                color: #1557a6;
+            }
+            QToolButton#ImportMenuButton::menu-indicator {
+                image: none;
+                width: 0;
+            }
+            QMenu#ImportMenu {
+                background: #ffffff;
+                border: 1px solid #cfd8e6;
+                border-radius: 8px;
+                padding: 6px;
+                color: #1f2937;
+            }
+            QMenu#ImportMenu::item {
+                background: transparent;
+                border-radius: 6px;
+                padding: 8px 28px 8px 12px;
+                min-width: 150px;
+            }
+            QMenu#ImportMenu::item:selected {
+                background: #eef5ff;
+                color: #1557a6;
+            }
+            QMenu#ImportMenu::item:disabled {
+                color: #94a3b8;
+            }
             QWidget#Sidebar {
                 background: #f8fafc;
                 border-right: 1px solid #dfe5ef;
@@ -1362,13 +1526,23 @@ class RadarReader(QMainWindow):
         self.status.showMessage(f"已载入 {len(self.scored)} 个项目", 5000)
 
     def prompt_refresh_data(self) -> None:
-        dialog = RefreshDataDialog(self)
-        if dialog.exec() != QDialog.Accepted:
+        self.reload_data()
+
+    def confirm_template_collection(self) -> None:
+        if self._collect_worker is not None and self._collect_worker.isRunning():
+            self.status.showMessage("正在采集中，请稍候…", 3000)
             return
-        if dialog.should_fetch_from_github():
-            self.collect_and_reload()
-        else:
-            self.reload_data()
+        reply = QMessageBox.question(
+            self,
+            "按模板自动抓取",
+            "将按设置中的查询模板连接 GitHub 抓取仓库，并写入本地数据库。\n\n"
+            "这会消耗 GitHub API 额度，并可能需要一点时间。确定继续吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.collect_and_reload()
 
     def collect_and_reload(self) -> None:
         if self._collect_worker is not None and self._collect_worker.isRunning():
@@ -1376,6 +1550,7 @@ class RadarReader(QMainWindow):
             return
 
         self.refresh_action.setEnabled(False)
+        self.template_collect_action.setEnabled(False)
         self.progress_bar.setRange(0, 0)  # 未知总量时先显示忙碌动画
         self.progress_bar.setValue(0)
         self.progress_bar.show()
@@ -1407,6 +1582,7 @@ class RadarReader(QMainWindow):
         self.progress_bar.hide()
         self.progress_bar.setRange(0, 100)
         self.refresh_action.setEnabled(True)
+        self.template_collect_action.setEnabled(True)
         self._collect_worker = None
 
     def import_repository(self) -> None:
@@ -1492,6 +1668,72 @@ class RadarReader(QMainWindow):
             f"已导入 {len(repos)} 个仓库。"
             + (f"\n已自动添加标签：{term}" if term else ""),
         )
+
+    def import_my_stars(self) -> None:
+        if self._starred_worker is not None and self._starred_worker.isRunning():
+            self.status.showMessage("正在读取 GitHub Stars，请稍候…", 3000)
+            return
+
+        self.status.showMessage("正在连接 GitHub 并读取你的 Stars…")
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.show()
+        self.import_stars_action.setEnabled(False)
+        worker = StarredImportWorker(self.settings)
+        worker.progress.connect(self._on_starred_progress)
+        worker.finished_ok.connect(self._on_starred_finished)
+        worker.failed.connect(self._on_starred_failed)
+        worker.finished.connect(self._on_starred_done)
+        self._starred_worker = worker
+        worker.start()
+
+    def _on_starred_progress(self, message: str) -> None:
+        self.status.showMessage(message)
+
+    def _on_starred_finished(self, repos: list[Repository], auth_label: str) -> None:
+        if not repos:
+            self.status.showMessage(f"没有读取到 GitHub Stars（认证：{auth_label}）", 5000)
+            QMessageBox.information(self, "没有可导入项目", f"没有读取到 GitHub Stars。\n认证方式：{auth_label}")
+            return
+
+        dialog = StarredImportDialog(repos, auth_label, self)
+        if dialog.exec() != QDialog.Accepted:
+            self.status.showMessage("已取消导入 GitHub Stars", 3000)
+            return
+
+        selected = dialog.selected_repositories()
+        if not selected:
+            self.status.showMessage("没有选择要导入的 GitHub Stars", 3000)
+            return
+
+        self.status.showMessage(f"正在导入 {len(selected)} 个 GitHub Stars…")
+        QApplication.processEvents()
+        count = db.upsert_repositories(self.conn, selected)
+        for repo in selected:
+            db.add_repository_tags(self.conn, repo.full_name, ["starred"])
+
+        self.reload_data()
+        self.apply_filters()
+        self._prepare_tag_input()
+        self.status.showMessage(f"已导入 {count} 个 GitHub Stars（认证：{auth_label}）", 5000)
+        QMessageBox.information(
+            self,
+            "导入完成",
+            f"已导入 {count} 个你选择的 starred 仓库。\n已自动添加标签：starred\n认证方式：{auth_label}",
+        )
+
+    def _on_starred_failed(self, message: str) -> None:
+        self.status.showMessage("GitHub Stars 读取失败", 5000)
+        QMessageBox.warning(
+            self,
+            "读取失败",
+            f"{message}\n\n请先在设置中配置 GitHub Token，或确认 GitHub CLI 已登录。",
+        )
+
+    def _on_starred_done(self) -> None:
+        self.progress_bar.hide()
+        self.progress_bar.setRange(0, 100)
+        self.import_stars_action.setEnabled(True)
+        self._starred_worker = None
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self)

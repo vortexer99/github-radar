@@ -6,7 +6,13 @@ from pathlib import Path
 import sys
 
 from . import db
-from .github_api import GitHubApiError, fetch_repository, last_auth_source, search_repositories
+from .github_api import (
+    GitHubApiError,
+    fetch_repository,
+    fetch_starred_repositories,
+    last_auth_source,
+    search_repositories,
+)
 from .query_planner import plan_collection_queries
 from .report import write_markdown_report
 from .scorer import score_all_repositories, score_repositories
@@ -32,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
         return feedback(args, settings, conn)
     if args.command == "import-repo":
         return import_repo(args, settings, conn)
+    if args.command == "import-stars":
+        return import_stars(args, settings, conn)
     if args.command == "run":
         return run(args, settings, conn)
 
@@ -69,6 +77,11 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser = sub.add_parser("import-repo", help="Manually import specific repositories.")
     import_parser.add_argument("--config", default=None, help="Path to radar.toml.")
     import_parser.add_argument("repos", nargs="+", help="Repositories in owner/name format.")
+
+    stars_parser = sub.add_parser("import-stars", help="Import repositories starred by your GitHub account.")
+    stars_parser.add_argument("--config", default=None, help="Path to radar.toml.")
+    stars_parser.add_argument("--limit", type=int, default=0, help="Maximum starred repositories to import; 0 imports all.")
+    stars_parser.add_argument("--per-page", type=int, default=100, help="GitHub API page size, 1-100.")
 
     init_parser = sub.add_parser("init-config", help="Create a default radar.toml.")
     init_parser.add_argument("--config", default="radar.toml", help="Path to radar.toml.")
@@ -178,6 +191,26 @@ def import_repo(args: argparse.Namespace, settings, conn) -> int:
         f"marked={stats['marked_repositories']}, "
         f"top_languages={stats['top_languages']}"
     )
+    print(f"GitHub auth: {last_auth_source()}")
+    return 0
+
+
+def import_stars(args: argparse.Namespace, settings, conn) -> int:
+    try:
+        repos = fetch_starred_repositories(
+            token=settings.github_token,
+            per_page=args.per_page,
+            limit=args.limit,
+            progress_callback=lambda page, message: print(message),
+        )
+    except GitHubApiError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    count = db.upsert_repositories(conn, repos)
+    for repo in repos:
+        db.add_repository_tags(conn, repo.full_name, ["starred"])
+    print(f"Imported {count} starred repositories.")
     print(f"GitHub auth: {last_auth_source()}")
     return 0
 

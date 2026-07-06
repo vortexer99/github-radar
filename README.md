@@ -12,7 +12,7 @@ GitHub Radar is a local-first radar for trending GitHub repositories. It collect
 
 This is a personal project by vortexer99 and evolves mainly around personal usage needs. No long-term maintenance, support, or compatibility guarantee is promised. Feature requests can be filed as issues.
 
-当前版本 / Current version: `1.3.0`
+当前版本 / Current version: `1.4.0`
 
 变更日志 / Changelog: [CHANGELOG.md](CHANGELOG.md)
 
@@ -77,15 +77,13 @@ Main workflow:
    Browse repositories in the middle column; feedback-marked repos use different background colors.
 3. 右栏阅读详情、打开 GitHub、记录反馈、管理自定义标签。
    Read details, open GitHub, record feedback, and manage custom tags in the right column.
-4. 点“刷新数据”默认只重新加载本地数据库；勾选“从 GitHub 获取最新数据后再刷新”才会运行 GitHub 采集。GitHub 采集按设置里的查询模板逐条搜索，默认包含 5 条广谱探索查询，每条最多拉取 `per_page` 个仓库，重复仓库会去重。
-   Click "刷新数据" / "Refresh data" to reload local data by default; select "从 GitHub 获取最新数据后再刷新" to run GitHub collection. GitHub collection searches each configured query, includes 5 broad exploration queries by default, fetches up to `per_page` repositories per query, and deduplicates repeated repos.
+4. 点“刷新本地”只重新加载本地数据库，不访问 GitHub。用“导入 > 按模板自动抓取”运行 GitHub 采集；采集会按设置里的查询模板逐条搜索，默认包含 5 条广谱探索查询，每条最多拉取 `per_page` 个仓库，重复仓库会去重。
+   Click "刷新本地" / "Refresh local" to reload local data without accessing GitHub. Use "导入 > 按模板自动抓取" / "Import > Auto fetch by templates" to run GitHub collection. GitHub collection searches each configured query, includes 5 broad exploration queries by default, fetches up to `per_page` repositories per query, and deduplicates repeated repos.
    每次 GitHub 采集都会在 `logs/` 下写入一份轻量文本日志，记录本轮查询列表和结果摘要。
    Each GitHub collection run writes a lightweight text log under `logs/` with the planned queries and outcome summary.
-5. 用“导入仓库”批量导入指定仓库。
-   Use "导入仓库" / "Import repositories" to batch import specific repos.
-6. 用“手动搜索 Repo”按 topic 或关键词搜索并勾选导入；这是人工导入入口，单次最多展示 30 个搜索结果，不使用 GitHub 采集设置。
-   Use "手动搜索 Repo" / "Manual Search Repo" to search by topic or keyword and import selected repos; this manual import flow shows up to 30 results per search and does not use GitHub collection settings.
-7. 用“设置”配置 GitHub Token、查看认证优先级和软件信息。
+5. 用“导入”菜单选择“按模板自动抓取”“按名称/地址导入”“搜索导入”或“从我的 Stars 导入”。搜索导入按 topic 或关键词展示最多 30 个结果；Stars 导入只读取当前认证账号，弹窗中默认全选，可取消不想导入的项目，导入后会自动添加 `starred` 标签。
+   Use the "导入" / "Import" menu to choose template-based fetching, name/URL import, search import, or importing from your Stars. Search import shows up to 30 topic/keyword results; Stars import only reads the authenticated account, opens a default-selected review dialog, and adds the `starred` tag after import.
+6. 用“设置”配置 GitHub Token、查看认证优先级和软件信息。
    Use "设置" / "Settings" to configure the GitHub Token, view credential priority, and see app information.
 
 反馈按钮支持切换状态：对未标记仓库点击会设置标记；对已有相同标记的仓库再次点击，会取消该标记。
@@ -145,6 +143,7 @@ python -m github_radar collect
 python -m github_radar report
 python -m github_radar run --config radar.toml
 python -m github_radar import-repo owner/repo another/repo
+python -m github_radar import-stars
 ```
 
 源码目录下可以用内置脚本注册 Windows 计划任务，默认周一和周四 06:00 运行：

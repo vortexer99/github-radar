@@ -6,7 +6,7 @@ import socket
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -105,6 +105,58 @@ def fetch_repository(full_name: str, *, token: str | None = None) -> Repository:
     return _repo_from_item(payload, f"manual:{payload.get('full_name', clean_name)}")
 
 
+def fetch_starred_repositories(
+    *,
+    token: str | None = None,
+    per_page: int = 100,
+    limit: int = 0,
+    progress_callback: Callable[[int, str], None] | None = None,
+) -> list[Repository]:
+    candidates = _credential_candidates(token, allow_anonymous=False)
+    if not candidates:
+        raise GitHubApiError("GitHub token is required to import your starred repositories.")
+
+    page = 1
+    repos: list[Repository] = []
+    seen: set[str] = set()
+    page_size = max(1, min(100, int(per_page)))
+    max_items = max(0, int(limit))
+
+    while True:
+        if progress_callback is not None:
+            progress_callback(page, f"正在读取 Stars 第 {page} 页")
+        payload = _request_json(
+            "/user/starred",
+            {
+                "sort": "created",
+                "direction": "desc",
+                "per_page": str(page_size),
+                "page": str(page),
+            },
+            candidates=candidates,
+        )
+        if not isinstance(payload, list) or not payload:
+            break
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            repo_item = item.get("repo") if "repo" in item else item
+            if not isinstance(repo_item, dict):
+                continue
+            full_name = repo_item.get("full_name", "")
+            if not full_name or full_name in seen:
+                continue
+            seen.add(full_name)
+            repos.append(_repo_from_item(repo_item, "starred:me"))
+            if max_items and len(repos) >= max_items:
+                return repos
+        if len(payload) < page_size:
+            break
+        page += 1
+
+    return repos
+
+
 def fetch_latest_release(repo: str, *, token: str | None = None) -> dict:
     candidates = _credential_candidates(token)
     clean_name = repo.strip().strip("/")
@@ -120,7 +172,7 @@ def fetch_latest_release(repo: str, *, token: str | None = None) -> dict:
     )
 
 
-def _request_json(path: str, params: dict[str, str], *, candidates: list[_CredentialCandidate]) -> dict:
+def _request_json(path: str, params: dict[str, str], *, candidates: list[_CredentialCandidate]) -> Any:
     global _LAST_AUTH_SOURCE
     last_auth_error: GitHubApiError | None = None
     for candidate in list(candidates):
@@ -141,7 +193,7 @@ def _request_json(path: str, params: dict[str, str], *, candidates: list[_Creden
     raise GitHubApiError("No GitHub API credential candidates available.")
 
 
-def _request_json_with_retries(path: str, params: dict[str, str], *, token: str | None) -> dict:
+def _request_json_with_retries(path: str, params: dict[str, str], *, token: str | None) -> Any:
     last_error: GitHubApiError | None = None
     for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
         try:
@@ -156,7 +208,7 @@ def _request_json_with_retries(path: str, params: dict[str, str], *, token: str 
     raise GitHubApiError("GitHub API request failed before any attempt was made.")
 
 
-def _request_json_with_token(path: str, params: dict[str, str], *, token: str | None) -> dict:
+def _request_json_with_token(path: str, params: dict[str, str], *, token: str | None) -> Any:
     query = f"?{urlencode(params)}" if params else ""
     url = f"{API_ROOT}{path}{query}"
     headers = {
@@ -185,7 +237,11 @@ def _request_json_with_token(path: str, params: dict[str, str], *, token: str | 
         raise GitHubApiError(f"GitHub API request timed out: {exc}", retriable=True) from exc
 
 
-def _credential_candidates(preferred_token: str | None) -> list[_CredentialCandidate]:
+def _credential_candidates(
+    preferred_token: str | None,
+    *,
+    allow_anonymous: bool = True,
+) -> list[_CredentialCandidate]:
     candidates: list[_CredentialCandidate] = []
     seen: set[str] = set()
 
@@ -202,7 +258,8 @@ def _credential_candidates(preferred_token: str | None) -> list[_CredentialCandi
     add("GitHub CLI login", _gh_auth_token())
     add("GH_TOKEN environment variable", os.getenv("GH_TOKEN"))
     add("GITHUB_TOKEN environment variable", os.getenv("GITHUB_TOKEN"))
-    candidates.append(_CredentialCandidate("anonymous API", None))
+    if allow_anonymous:
+        candidates.append(_CredentialCandidate("anonymous API", None))
     return candidates
 
 

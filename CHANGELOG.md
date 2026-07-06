@@ -2,6 +2,21 @@
 
 All notable changes to GitHub Radar are documented here.
 
+## [1.4.0] - 2026-07-06
+
+### Added
+
+- Added authenticated import for repositories starred by the current GitHub account, including CLI support via `import-stars`.
+- Added a reader review dialog for Stars imports so repositories are default-selected but can be unchecked before import.
+- Added a template-based GitHub collection entry under the reader's Import menu with a confirmation prompt before using the GitHub API.
+
+### Changed
+
+- Reorganized the reader toolbar around local refresh, grouped import actions, random browsing, and settings.
+- Renamed local reload to "刷新本地" and moved GitHub template collection out of the refresh flow.
+- Updated reader import wording and README guidance to distinguish template collection, name/URL import, search import, and Stars import.
+- Prevented the reader toolbar from being accidentally hidden through the default Qt toolbar context menu.
+
 ## [1.3.0] - 2026-06-25
 
 ### Added
